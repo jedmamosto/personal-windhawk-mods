@@ -22,6 +22,8 @@
 
 #include <string>
 #include <vector>
+#include <unordered_set>
+#include <unordered_map>
 #include <chrono>
 #include <cmath>
 #include <algorithm>
@@ -353,10 +355,10 @@ inline bool Parse(std::string_view jsonStr, Value& outRoot) {
 struct Subagent {
     std::wstring name;
     std::wstring role;
-    std::wstring state; // "running", "idle", "waiting_for_input", "errored"
+    std::wstring state; // "running", "idle", "waiting_for_input", "errored", "SUBAGENT_STATE_ALIVE"
 
     bool IsRunning() const {
-        return state == L"running" || state == L"active" || state == L"working";
+        return state == L"running" || state == L"active" || state == L"working" || state == L"SUBAGENT_STATE_ALIVE";
     }
     bool IsErrored() const {
         return state == L"errored" || state == L"failed";
@@ -389,6 +391,7 @@ constexpr uint64_t kSessionPruneThresholdSec = 3600; // 1 hour
 struct SessionTelemetry {
     std::wstring sourceFilePath;
     FILETIME lastWriteTime = {};
+    FILETIME creationTime = {};
     uint64_t mtimeKey = 0;
 
     std::wstring activeConversationId;
@@ -413,10 +416,41 @@ struct SessionTelemetry {
     std::wstring lastCompletedEvent;
     std::wstring updatedAt;
     uint64_t updatedAtEpoch = 0;
+    uint64_t sessionStartEpoch = 0;
     bool isValid = false;
 
     bool IsCompactionWarning() const {
         return GetRatio() >= compactionThresholdFraction;
+    }
+
+    uint64_t GetDurationSeconds() const {
+        ULARGE_INTEGER uCreated;
+        uCreated.LowPart = creationTime.dwLowDateTime;
+        uCreated.HighPart = creationTime.dwHighDateTime;
+        if (uCreated.QuadPart > 0) {
+            FILETIME ftNow;
+            GetSystemTimeAsFileTime(&ftNow);
+            ULARGE_INTEGER uNow;
+            uNow.LowPart = ftNow.dwLowDateTime;
+            uNow.HighPart = ftNow.dwHighDateTime;
+            if (uNow.QuadPart > uCreated.QuadPart) {
+                return (uNow.QuadPart - uCreated.QuadPart) / 10000000ULL;
+            }
+        }
+        if (sessionStartEpoch > 0) {
+            FILETIME ftNow;
+            GetSystemTimeAsFileTime(&ftNow);
+            ULARGE_INTEGER uNow;
+            uNow.LowPart = ftNow.dwLowDateTime;
+            uNow.HighPart = ftNow.dwHighDateTime;
+            uint64_t unixNow = (uNow.QuadPart >= 116444736000000000ULL)
+                ? (uNow.QuadPart - 116444736000000000ULL) / 10000000ULL
+                : 0;
+            if (unixNow > sessionStartEpoch) {
+                return unixNow - sessionStartEpoch;
+            }
+        }
+        return (currentStep > 0) ? static_cast<uint64_t>(currentStep * 24) : 60;
     }
 
     uint64_t GetAgeSeconds() const {
@@ -459,13 +493,19 @@ struct SessionTelemetry {
     }
 
     size_t GetRunningSubagentsCount() const {
-        // If the session hasn't received updates in 3 minutes, running subagents are considered dead
-        if (GetAgeSeconds() > kRunningStaleThresholdSec) {
-            return 0;
-        }
         size_t c = 0;
         for (const auto& sa : activeSubagents) {
             if (sa.IsRunning()) c++;
+        }
+        if (c > 0 && GetAgeSeconds() > kRunningStaleThresholdSec) {
+            bool hasExplicitAlive = false;
+            for (const auto& sa : activeSubagents) {
+                if (sa.state == L"SUBAGENT_STATE_ALIVE") {
+                    hasExplicitAlive = true;
+                    break;
+                }
+            }
+            if (!hasExplicitAlive) return 0;
         }
         return c;
     }
@@ -693,11 +733,14 @@ inline bool ParseSessionJson(const std::string& jsonStr, SessionTelemetry& outTe
             } catch (...) {}
         }
     }
+    if (root.HasKey("sessionStartEpoch")) {
+        outTelemetry.sessionStartEpoch = root["sessionStartEpoch"].AsUInt64(0);
+    }
     outTelemetry.isValid = true;
     return true;
 }
 
-// Token Gauge Formatting Helpers
+// Token Gauge & Metric Formatting Helpers
 inline std::wstring FormatTokenCount(uint64_t count) {
     wchar_t buf[32];
     if (count >= 1000000) {
@@ -708,6 +751,34 @@ inline std::wstring FormatTokenCount(uint64_t count) {
         swprintf_s(buf, L"%llu", static_cast<unsigned long long>(count));
     }
     return buf;
+}
+
+inline std::wstring FormatActiveTime(uint64_t durationSec) {
+    if (durationSec < 60) {
+        return std::to_wstring(durationSec) + L"s";
+    }
+    uint64_t minutes = durationSec / 60;
+    if (minutes < 60) {
+        return std::to_wstring(minutes) + L"m";
+    }
+    uint64_t hours = minutes / 60;
+    uint64_t remMinutes = minutes % 60;
+    if (remMinutes == 0) {
+        return std::to_wstring(hours) + L"h";
+    }
+    return std::to_wstring(hours) + L"h " + std::to_wstring(remMinutes) + L"m";
+}
+
+inline std::wstring FormatUpdatedAgo(uint64_t ageSec) {
+    if (ageSec < 60) {
+        return L"Active";
+    }
+    uint64_t minutes = ageSec / 60;
+    if (minutes < 60) {
+        return L"Updated " + std::to_wstring(minutes) + L"m ago";
+    }
+    uint64_t hours = minutes / 60;
+    return L"Updated " + std::to_wstring(hours) + L"h ago";
 }
 
 enum class TokenPressureTier {
@@ -1170,18 +1241,17 @@ public:
             microFormat = smallTextFormat;
         }
 
-        const float totalHeight = (rect.bottom - rect.top) - padY * 2.0f;
-        const float vFit = std::clamp(totalHeight / 190.0f, 0.85f, 1.15f);
+        (void)accentColor;
 
         // --------------------------------------------------------------------
         // ZONE A: Header Row (Sparkle Icon, Conversation Title, Turn/Step Pill)
         // --------------------------------------------------------------------
         const float headerTop = rect.top + padY;
-        const float headerHeight = 22.0f * scale * vFit;
+        const float headerHeight = 22.0f * scale;
         const float headerBottom = headerTop + headerHeight;
 
         // Turn & Step Pill Geometry
-        const float turnPillW = (hasMultiple ? 154.0f : 126.0f) * scale;
+        const float turnPillW = (hasMultiple ? 146.0f : 124.0f) * scale;
         const float turnPillH = 20.0f * scale;
         const D2D1_RECT_F turnPillRect = D2D1::RectF(
             rect.right - padX - turnPillW,
@@ -1270,208 +1340,13 @@ public:
                              turnTextRect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
-        // --------------------------------------------------------------------
-        // ZONE B: Latest Message Snippet Box with Role Attribution Badge
-        // --------------------------------------------------------------------
-        const float msgGap = 7.0f * scale * vFit;
-        const float msgTop = headerBottom + msgGap;
-        const float msgHeight = 44.0f * scale * vFit;
-        const float msgBottom = msgTop + msgHeight;
-        const D2D1_RECT_F msgBoxRect = D2D1::RectF(rect.left + padX, msgTop, rect.right - padX, msgBottom);
-
-        DrawCard(target, msgBoxRect, 8.0f * scale, bentoBgBrush.Get(), bentoBorderBrush.Get());
-
-        // B1. Role Attribution Badge
-        const bool isUser = session && (session->lastMessageSender == L"USER");
-        const wchar_t* roleText = isUser ? L"USER" : L"AGENT";
-        const D2D1_COLOR_F roleColor   = isUser ? D2D1::ColorF(0.506f, 0.549f, 0.973f, 1.0f) : kAppleGreen;
-        const D2D1_COLOR_F roleBgColor = isUser ? D2D1::ColorF(0.506f, 0.549f, 0.973f, 0.15f) : D2D1::ColorF(0.204f, 0.780f, 0.349f, 0.15f);
-        const D2D1_COLOR_F roleBrdCol  = isUser ? D2D1::ColorF(0.506f, 0.549f, 0.973f, 0.35f) : D2D1::ColorF(0.204f, 0.780f, 0.349f, 0.35f);
-
-        ComPtr<ID2D1SolidColorBrush> roleTextBrush;
-        ComPtr<ID2D1SolidColorBrush> roleBgBrush;
-        ComPtr<ID2D1SolidColorBrush> roleBrdBrush;
-        target->CreateSolidColorBrush(roleColor, &roleTextBrush);
-        target->CreateSolidColorBrush(roleBgColor, &roleBgBrush);
-        target->CreateSolidColorBrush(roleBrdCol, &roleBrdBrush);
-
-        const float badgeW = 42.0f * scale;
-        const float badgeH = 14.0f * scale;
-        const D2D1_RECT_F badgeRect = D2D1::RectF(
-            msgBoxRect.left + 9.0f * scale,
-            msgBoxRect.top + 6.0f * scale,
-            msgBoxRect.left + 9.0f * scale + badgeW,
-            msgBoxRect.top + 6.0f * scale + badgeH
-        );
-        DrawCard(target, badgeRect, 3.5f * scale, roleBgBrush.Get(), roleBrdBrush.Get());
-
-        if (microFormat && roleTextBrush) {
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(roleText, static_cast<UINT32>(wcslen(roleText)), microFormat.Get(),
-                             badgeRect, roleTextBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
-
-        // B2. Relative Timestamp
-        std::wstring timeStr = L"Just now";
-        if (session) {
-            uint64_t age = session->GetAgeSeconds();
-            if (age >= 3600) {
-                timeStr = std::to_wstring(age / 3600) + L"h ago";
-            } else if (age >= 60) {
-                timeStr = std::to_wstring(age / 60) + L"m ago";
-            }
-        }
-        if (microFormat && textTertiaryBrush) {
-            D2D1_RECT_F timeRect = D2D1::RectF(
-                badgeRect.right + 7.0f * scale,
-                badgeRect.top,
-                msgBoxRect.right - 9.0f * scale,
-                badgeRect.bottom
-            );
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(timeStr.c_str(), static_cast<UINT32>(timeStr.size()), microFormat.Get(),
-                             timeRect, textTertiaryBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
-
-        // B3. Message Snippet Content
-        std::wstring snippet = (session && !session->lastMessageSnippet.empty())
-            ? session->lastMessageSnippet
-            : L"Session active and ready for instructions.";
-        if (smallTextFormat && textWhiteBrush) {
-            D2D1_RECT_F snippetRect = D2D1::RectF(
-                msgBoxRect.left + 9.0f * scale,
-                msgBoxRect.top + 22.0f * scale,
-                msgBoxRect.right - 9.0f * scale,
-                msgBoxRect.bottom - 4.0f * scale
-            );
-            smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-            target->DrawText(snippet.c_str(), static_cast<UINT32>(snippet.size()), smallTextFormat,
-                             snippetRect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
+        const float gap = 8.0f * scale;
 
         // --------------------------------------------------------------------
-        // ZONE C: Gemini Models Usage Limits (Dual Bento Cards with Progress Rings)
+        // ZONE B: Context Window & Compaction Bar (HERO FEATURE - ON TOP)
         // --------------------------------------------------------------------
-        const float quotaGap = 7.0f * scale * vFit;
-        const float quotaTop = msgBottom + quotaGap;
-        const float quotaHeight = 54.0f * scale * vFit;
-        const float quotaBottom = quotaTop + quotaHeight;
-        const float quotaTotalWidth = (rect.right - rect.left) - padX * 2.0f;
-        const float colGap = 7.0f * scale;
-        const float cardWidth = (quotaTotalWidth - colGap) * 0.5f;
-
-        // C1. 5-Hour Limit Card (Left)
-        const D2D1_RECT_F fiveHrRect = D2D1::RectF(rect.left + padX, quotaTop, rect.left + padX + cardWidth, quotaBottom);
-        DrawCard(target, fiveHrRect, 8.0f * scale, bentoBgBrush.Get(), bentoBorderBrush.Get());
-
-        const float fiveHrFraction = session ? session->gemini5HourRemainingFraction : 0.80f;
-        const D2D1_POINT_2F ring5hCenter = D2D1::Point2F(fiveHrRect.left + 24.0f * scale, (fiveHrRect.top + fiveHrRect.bottom) * 0.5f);
-        const float ringRadius = 15.0f * scale;
-        const float strokeW = 2.8f * scale;
-
-        DrawCircularProgressRing(target, factory.Get(), ring5hCenter, ringRadius, strokeW,
-                                 fiveHrFraction, cyanBrush.Get(), trackBgBrush.Get());
-
-        // 5-Hour Limit Text Content
-        wchar_t buf5h[16];
-        swprintf_s(buf5h, L"%.0f%%", fiveHrFraction * 100.0f);
-        if (microFormat && textWhiteBrush) {
-            D2D1_RECT_F pct5hRect = D2D1::RectF(ring5hCenter.x - ringRadius, ring5hCenter.y - ringRadius,
-                                                ring5hCenter.x + ringRadius, ring5hCenter.y + ringRadius);
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(buf5h, static_cast<UINT32>(wcslen(buf5h)), microFormat.Get(),
-                             pct5hRect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
-
-        const float text5hLeft = ring5hCenter.x + 20.0f * scale;
-        if (microFormat && textMutedBrush && textWhiteBrush && textTertiaryBrush) {
-            // Label
-            D2D1_RECT_F lbl5hRect = D2D1::RectF(text5hLeft, fiveHrRect.top + 6.0f * scale, fiveHrRect.right - 6.0f * scale, fiveHrRect.top + 18.0f * scale);
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(L"5-HOUR LIMIT", 12, microFormat.Get(), lbl5hRect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-            // Value Remaining
-            wchar_t val5hBuf[32];
-            swprintf_s(val5hBuf, L"%.0f%% remaining", fiveHrFraction * 100.0f);
-            D2D1_RECT_F val5hRect = D2D1::RectF(text5hLeft, fiveHrRect.top + 18.0f * scale, fiveHrRect.right - 6.0f * scale, fiveHrRect.top + 34.0f * scale);
-            IDWriteTextFormat* boldFmt = boldTextFormat ? boldTextFormat : smallTextFormat;
-            if (boldFmt) {
-                boldFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                boldFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                target->DrawText(val5hBuf, static_cast<UINT32>(wcslen(val5hBuf)), boldFmt, val5hRect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            }
-
-            // Reset Countdown
-            std::wstring rst5h = (session && !session->gemini5HourResetCountdown.empty())
-                ? session->gemini5HourResetCountdown
-                : L"Resets in 4h 27m";
-            D2D1_RECT_F rst5hRect = D2D1::RectF(text5hLeft, fiveHrRect.top + 34.0f * scale, fiveHrRect.right - 6.0f * scale, fiveHrRect.bottom - 4.0f * scale);
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(rst5h.c_str(), static_cast<UINT32>(rst5h.size()), microFormat.Get(), rst5hRect, textTertiaryBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
-
-        // C2. Weekly Limit Card (Right)
-        const D2D1_RECT_F weeklyRect = D2D1::RectF(fiveHrRect.right + colGap, quotaTop, rect.right - padX, quotaBottom);
-        DrawCard(target, weeklyRect, 8.0f * scale, bentoBgBrush.Get(), bentoBorderBrush.Get());
-
-        const float weeklyFraction = session ? session->geminiWeeklyRemainingFraction : 0.48f;
-        const D2D1_POINT_2F ringWkCenter = D2D1::Point2F(weeklyRect.left + 24.0f * scale, (weeklyRect.top + weeklyRect.bottom) * 0.5f);
-
-        DrawCircularProgressRing(target, factory.Get(), ringWkCenter, ringRadius, strokeW,
-                                 weeklyFraction, purpleBrush.Get(), trackBgBrush.Get());
-
-        wchar_t bufWk[16];
-        swprintf_s(bufWk, L"%.0f%%", weeklyFraction * 100.0f);
-        if (microFormat && textWhiteBrush) {
-            D2D1_RECT_F pctWkRect = D2D1::RectF(ringWkCenter.x - ringRadius, ringWkCenter.y - ringRadius,
-                                                ringWkCenter.x + ringRadius, ringWkCenter.y + ringRadius);
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(bufWk, static_cast<UINT32>(wcslen(bufWk)), microFormat.Get(),
-                             pctWkRect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
-
-        const float textWkLeft = ringWkCenter.x + 20.0f * scale;
-        if (microFormat && textMutedBrush && textWhiteBrush && textTertiaryBrush) {
-            // Label
-            D2D1_RECT_F lblWkRect = D2D1::RectF(textWkLeft, weeklyRect.top + 6.0f * scale, weeklyRect.right - 6.0f * scale, weeklyRect.top + 18.0f * scale);
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(L"WEEKLY LIMIT", 12, microFormat.Get(), lblWkRect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-            // Value Remaining
-            wchar_t valWkBuf[32];
-            swprintf_s(valWkBuf, L"%.0f%% remaining", weeklyFraction * 100.0f);
-            D2D1_RECT_F valWkRect = D2D1::RectF(textWkLeft, weeklyRect.top + 18.0f * scale, weeklyRect.right - 6.0f * scale, weeklyRect.top + 34.0f * scale);
-            IDWriteTextFormat* boldFmt = boldTextFormat ? boldTextFormat : smallTextFormat;
-            if (boldFmt) {
-                boldFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                boldFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                target->DrawText(valWkBuf, static_cast<UINT32>(wcslen(valWkBuf)), boldFmt, valWkRect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            }
-
-            // Reset Countdown
-            std::wstring rstWk = (session && !session->geminiWeeklyResetCountdown.empty())
-                ? session->geminiWeeklyResetCountdown
-                : L"Resets in 5d 23h";
-            D2D1_RECT_F rstWkRect = D2D1::RectF(textWkLeft, weeklyRect.top + 34.0f * scale, weeklyRect.right - 6.0f * scale, weeklyRect.bottom - 4.0f * scale);
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(rstWk.c_str(), static_cast<UINT32>(rstWk.size()), microFormat.Get(), rstWkRect, textTertiaryBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
-
-        // --------------------------------------------------------------------
-        // ZONE D: Context Compaction Warning & Token Budget Track
-        // --------------------------------------------------------------------
-        const float ctxGap = 7.0f * scale * vFit;
-        const float ctxTop = quotaBottom + ctxGap;
-        const float ctxHeight = 32.0f * scale * vFit;
+        const float ctxTop = headerBottom + gap;
+        const float ctxHeight = 28.0f * scale;
         const float ctxBottom = ctxTop + ctxHeight;
         const D2D1_RECT_F contextRect = D2D1::RectF(rect.left + padX, ctxTop, rect.right - padX, ctxBottom);
 
@@ -1483,10 +1358,10 @@ public:
         const float threshold = session ? session->compactionThresholdFraction : 0.80f;
         const bool isCompactionWarn = session ? session->IsCompactionWarning() : (ratio >= 0.80f);
 
-        // D1. Labels
+        // B1. Context Labels
         if (microFormat) {
-            D2D1_RECT_F ctxLblRect = D2D1::RectF(contextRect.left + 9.0f * scale, contextRect.top + 4.0f * scale,
-                                                contextRect.left + 140.0f * scale, contextRect.top + 16.0f * scale);
+            D2D1_RECT_F ctxLblRect = D2D1::RectF(contextRect.left + 9.0f * scale, contextRect.top + 3.0f * scale,
+                                                contextRect.left + 120.0f * scale, contextRect.top + 15.0f * scale);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             target->DrawText(L"CONTEXT TOKENS", 14, microFormat.Get(), ctxLblRect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
@@ -1496,8 +1371,8 @@ public:
                        FormatTokenCount(curTokens).c_str(), FormatTokenCount(maxTokens).c_str(),
                        ratio * 100.0f, threshold * 100.0f);
 
-            D2D1_RECT_F ctxValRect = D2D1::RectF(contextRect.left + 140.0f * scale, contextRect.top + 4.0f * scale,
-                                                contextRect.right - 9.0f * scale, contextRect.top + 16.0f * scale);
+            D2D1_RECT_F ctxValRect = D2D1::RectF(contextRect.left + 120.0f * scale, contextRect.top + 3.0f * scale,
+                                                contextRect.right - 9.0f * scale, contextRect.top + 15.0f * scale);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
@@ -1507,11 +1382,11 @@ public:
                              ctxValRect, valBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
-        // D2. Progress Bar Track & 80% Threshold Hairline
+        // B2. Progress Bar Track & 80% Threshold Hairline
         const float barLeft = contextRect.left + 9.0f * scale;
         const float barRight = contextRect.right - 9.0f * scale;
         const float barWidth = barRight - barLeft;
-        const float barTop = contextRect.top + 18.0f * scale;
+        const float barTop = contextRect.top + 17.0f * scale;
         const float barBottom = barTop + 5.0f * scale;
         const float barRadius = 2.5f * scale;
 
@@ -1534,6 +1409,123 @@ public:
             redBrush.Get(),
             1.5f * scale
         );
+
+        // --------------------------------------------------------------------
+        // ZONE C: Dual Real Metrics Bento Cards (Active Time & Total Actions)
+        // --------------------------------------------------------------------
+        const float cardsTop = ctxBottom + gap;
+        const float cardsHeight = 54.0f * scale;
+        const float cardsBottom = cardsTop + cardsHeight;
+        const float cardsTotalWidth = (rect.right - rect.left) - padX * 2.0f;
+        const float colGap = 8.0f * scale;
+        const float cardWidth = (cardsTotalWidth - colGap) * 0.5f;
+
+        // C1. ACTIVE TIME Card (Left)
+        const D2D1_RECT_F activeTimeRect = D2D1::RectF(rect.left + padX, cardsTop, rect.left + padX + cardWidth, cardsBottom);
+        DrawCard(target, activeTimeRect, 8.0f * scale, bentoBgBrush.Get(), bentoBorderBrush.Get());
+
+        const uint64_t durationSec = session ? session->GetDurationSeconds() : 0;
+        const uint64_t ageSec = session ? session->GetAgeSeconds() : 0;
+        const float timingFraction = std::clamp(static_cast<float>((durationSec % 3600)) / 3600.0f, 0.05f, 1.0f);
+        const D2D1_POINT_2F ring1Center = D2D1::Point2F(activeTimeRect.left + 22.0f * scale, (activeTimeRect.top + activeTimeRect.bottom) * 0.5f);
+        const float ringRadius = 14.0f * scale;
+        const float strokeW = 2.6f * scale;
+
+        DrawCircularProgressRing(target, factory.Get(), ring1Center, ringRadius, strokeW,
+                                 timingFraction, cyanBrush.Get(), trackBgBrush.Get());
+
+        std::wstring ring1Text = (durationSec < 60) ? (std::to_wstring(durationSec) + L"s")
+            : ((durationSec < 3600) ? (std::to_wstring(durationSec / 60) + L"m")
+            : (std::to_wstring(durationSec / 3600) + L"h"));
+        if (microFormat && textWhiteBrush) {
+            D2D1_RECT_F pct1Rect = D2D1::RectF(ring1Center.x - ringRadius, ring1Center.y - ringRadius,
+                                               ring1Center.x + ringRadius, ring1Center.y + ringRadius);
+            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            target->DrawText(ring1Text.c_str(), static_cast<UINT32>(ring1Text.size()), microFormat.Get(),
+                             pct1Rect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+
+        const float text1Left = ring1Center.x + 18.0f * scale;
+        if (microFormat && textMutedBrush && textWhiteBrush && textTertiaryBrush) {
+            // Label
+            D2D1_RECT_F lbl1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 6.0f * scale, activeTimeRect.right - 6.0f * scale, activeTimeRect.top + 17.0f * scale);
+            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            target->DrawText(L"ACTIVE TIME", 11, microFormat.Get(), lbl1Rect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+            // Value
+            std::wstring val1 = FormatActiveTime(durationSec);
+            D2D1_RECT_F val1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 17.0f * scale, activeTimeRect.right - 6.0f * scale, activeTimeRect.top + 33.0f * scale);
+            IDWriteTextFormat* boldFmt = boldTextFormat ? boldTextFormat : smallTextFormat;
+            if (boldFmt) {
+                boldFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                boldFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                target->DrawText(val1.c_str(), static_cast<UINT32>(val1.size()), boldFmt, val1Rect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+
+            // Subtitle
+            std::wstring sub1 = FormatUpdatedAgo(ageSec);
+            D2D1_RECT_F sub1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 34.0f * scale, activeTimeRect.right - 6.0f * scale, activeTimeRect.bottom - 5.0f * scale);
+            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            ID2D1Brush* sub1Brush = (sub1 == L"Active") ? greenBrush.Get() : textTertiaryBrush.Get();
+            target->DrawText(sub1.c_str(), static_cast<UINT32>(sub1.size()), microFormat.Get(), sub1Rect, sub1Brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+
+        // C2. TOTAL ACTIONS Card (Right)
+        const D2D1_RECT_F actionsRect = D2D1::RectF(activeTimeRect.right + colGap, cardsTop, rect.right - padX, cardsBottom);
+        DrawCard(target, actionsRect, 8.0f * scale, bentoBgBrush.Get(), bentoBorderBrush.Get());
+
+        const size_t runningSubagents = session ? session->GetRunningSubagentsCount() : 0;
+        const int stepsCount = session ? session->currentStep : 0;
+        const D2D1_POINT_2F ring2Center = D2D1::Point2F(actionsRect.left + 22.0f * scale, (actionsRect.top + actionsRect.bottom) * 0.5f);
+
+        ID2D1SolidColorBrush* ring2Brush = (runningSubagents > 0) ? greenBrush.Get() : cyanBrush.Get();
+        float ring2Fraction = (runningSubagents > 0) ? 1.0f : std::clamp(static_cast<float>(stepsCount % 50) / 50.0f, 0.15f, 1.0f);
+
+        DrawCircularProgressRing(target, factory.Get(), ring2Center, ringRadius, strokeW,
+                                 ring2Fraction, ring2Brush, trackBgBrush.Get());
+
+        std::wstring ring2Text = (runningSubagents > 0) ? std::to_wstring(runningSubagents) : L"\u2726";
+        if (microFormat && textWhiteBrush) {
+            D2D1_RECT_F pct2Rect = D2D1::RectF(ring2Center.x - ringRadius, ring2Center.y - ringRadius,
+                                               ring2Center.x + ringRadius, ring2Center.y + ringRadius);
+            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            ID2D1Brush* ring2TextBrush = (runningSubagents > 0) ? greenBrush.Get() : textWhiteBrush.Get();
+            target->DrawText(ring2Text.c_str(), static_cast<UINT32>(ring2Text.size()), microFormat.Get(),
+                             pct2Rect, ring2TextBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+
+        const float text2Left = ring2Center.x + 18.0f * scale;
+        if (microFormat && textMutedBrush && textWhiteBrush && textTertiaryBrush) {
+            // Label
+            D2D1_RECT_F lbl2Rect = D2D1::RectF(text2Left, actionsRect.top + 6.0f * scale, actionsRect.right - 6.0f * scale, actionsRect.top + 17.0f * scale);
+            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            target->DrawText(L"TOTAL ACTIONS", 13, microFormat.Get(), lbl2Rect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+            // Value
+            std::wstring val2 = std::to_wstring(stepsCount) + L" Steps";
+            D2D1_RECT_F val2Rect = D2D1::RectF(text2Left, actionsRect.top + 17.0f * scale, actionsRect.right - 6.0f * scale, actionsRect.top + 33.0f * scale);
+            IDWriteTextFormat* boldFmt = boldTextFormat ? boldTextFormat : smallTextFormat;
+            if (boldFmt) {
+                boldFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                boldFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                target->DrawText(val2.c_str(), static_cast<UINT32>(val2.size()), boldFmt, val2Rect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+
+            // Subtitle
+            std::wstring sub2 = (runningSubagents > 0)
+                ? (std::to_wstring(runningSubagents) + L" Subagents Active")
+                : L"All Tasks Idle";
+            D2D1_RECT_F sub2Rect = D2D1::RectF(text2Left, actionsRect.top + 34.0f * scale, actionsRect.right - 6.0f * scale, actionsRect.bottom - 5.0f * scale);
+            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            ID2D1Brush* sub2Brush = (runningSubagents > 0) ? greenBrush.Get() : textTertiaryBrush.Get();
+            target->DrawText(sub2.c_str(), static_cast<UINT32>(sub2.size()), microFormat.Get(), sub2Rect, sub2Brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
     }
 
 private:
@@ -1547,6 +1539,7 @@ private:
     mutable std::vector<SessionTelemetry> sessionsSnapshot_;
     mutable SessionTelemetry activeSessionSnapshot_;
     mutable bool hasActiveSessionSnapshot_ = false;
+    std::unordered_set<std::wstring> knownSubagentIds_;
 
     size_t selectedSessionIndex_ = 0;
     bool autoFollowMru_ = true;
@@ -1597,7 +1590,15 @@ private:
         if (!ParseSessionJson(jsonContent, telem)) {
             return false;
         }
+        if (!telem.activeConversationId.empty() &&
+            knownSubagentIds_.find(telem.activeConversationId) != knownSubagentIds_.end()) {
+            return false;
+        }
         EnrichSessionFromBrainLocked(telem);
+        if (!telem.activeConversationId.empty() &&
+            knownSubagentIds_.find(telem.activeConversationId) != knownSubagentIds_.end()) {
+            return false;
+        }
 
         std::lock_guard<std::mutex> lock(stateMutex_);
         auto it = std::find_if(sessions_.begin(), sessions_.end(),
@@ -1657,8 +1658,13 @@ private:
             }
         }
 
-        // 1. Scan .system_generated\steps to find latest step number if needed
         if (!convFolder.empty()) {
+            WIN32_FILE_ATTRIBUTE_DATA dirFad = {};
+            if (GetFileAttributesExW(convFolder.c_str(), GetFileExInfoStandard, &dirFad)) {
+                telem.creationTime = dirFad.ftCreationTime;
+            }
+
+            // 1. Scan .system_generated\steps to find latest step number if needed
             std::wstring stepsDir = convFolder + L"\\.system_generated\\steps";
             if (DirectoryExists(stepsDir)) {
                 WIN32_FIND_DATAW sfd;
@@ -1732,9 +1738,55 @@ private:
                     }
                 }
             }
+
+            // 3. Scan .system_generated\subagents to get alive subagents count & details
+            std::wstring subagentsDir = convFolder + L"\\.system_generated\\subagents";
+            if (DirectoryExists(subagentsDir)) {
+                WIN32_FIND_DATAW safd;
+                HANDLE hFindSa = FindFirstFileW((subagentsDir + L"\\*.json").c_str(), &safd);
+                if (hFindSa != INVALID_HANDLE_VALUE) {
+                    std::vector<Subagent> discoveredSubagents;
+                    int aliveCount = 0;
+                    do {
+                        if (!(safd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                            std::wstring saFilePath = subagentsDir + L"\\" + safd.cFileName;
+                            std::string saJson = ReadFileShared(saFilePath);
+                            if (!saJson.empty()) {
+                                json::Value saRoot;
+                                if (json::Parse(saJson, saRoot) && saRoot.IsObject()) {
+                                    std::wstring saId = saRoot["conversationId"].AsWString();
+                                    std::wstring saRole = saRoot["subagentDescriptor"]["role"].AsWString();
+                                    std::wstring saState = saRoot["state"].AsWString();
+
+                                    Subagent sa;
+                                    sa.name = saId;
+                                    sa.role = saRole;
+                                    sa.state = saState;
+
+                                    if (saState == L"SUBAGENT_STATE_ALIVE" || saState == L"running" || saState == L"active") {
+                                        sa.state = L"SUBAGENT_STATE_ALIVE";
+                                        aliveCount++;
+                                    }
+                                    discoveredSubagents.push_back(sa);
+                                }
+                            }
+                        }
+                    } while (FindNextFileW(hFindSa, &safd));
+                    FindClose(hFindSa);
+
+                    if (!discoveredSubagents.empty()) {
+                        telem.activeSubagents = std::move(discoveredSubagents);
+                    }
+                    if (aliveCount > 0) {
+                        FILETIME ftNow;
+                        GetSystemTimeAsFileTime(&ftNow);
+                        telem.lastWriteTime = ftNow;
+                    }
+                }
+            }
         }
 
-        // 3. Fallbacks and defaults
+        // 4. Fallbacks and defaults
         if (telem.currentTurn == 0) {
             if (telem.currentStep > 0) {
                 telem.currentTurn = std::max(1, (telem.currentStep + 3) / 4);
@@ -1769,39 +1821,98 @@ private:
     }
 
     // Scans brain candidate files across active conversations
+    // Option B: Hierarchical Subagent Filtering
     void ScanBrainDirectoryLocked(std::vector<std::wstring>& outPaths) {
         if (brainScanDir_.empty()) return;
 
+        knownSubagentIds_.clear();
+
+        // Pass 1: Scan all session folders in brainScanDir_. For each folder that has a
+        // .system_generated\subagents subfolder, find all *.json files inside it.
+        // Extract "conversationId" from each json and add it to knownSubagentIds_.
+        std::wstring searchPattern = brainScanDir_ + L"\\*";
+        WIN32_FIND_DATAW fd;
+        HANDLE hFind = FindFirstFileW(searchPattern.c_str(), &fd);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                    wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
+                    
+                    std::wstring subagentsDir = brainScanDir_ + L"\\" + fd.cFileName + L"\\.system_generated\\subagents";
+                    if (DirectoryExists(subagentsDir)) {
+                        WIN32_FIND_DATAW safd;
+                        HANDLE hFindSa = FindFirstFileW((subagentsDir + L"\\*.json").c_str(), &safd);
+                        if (hFindSa != INVALID_HANDLE_VALUE) {
+                            do {
+                                if (!(safd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                                    std::wstring saFilePath = subagentsDir + L"\\" + safd.cFileName;
+                                    std::string saJson = ReadFileShared(saFilePath);
+                                    if (!saJson.empty()) {
+                                        json::Value saRoot;
+                                        if (json::Parse(saJson, saRoot) && saRoot.IsObject()) {
+                                            std::wstring saId = saRoot["conversationId"].AsWString();
+                                            if (!saId.empty()) {
+                                                knownSubagentIds_.insert(saId);
+                                            }
+                                        }
+                                    }
+                                }
+                            } while (FindNextFileW(hFindSa, &safd));
+                            FindClose(hFindSa);
+                        }
+                    }
+                }
+            } while (FindNextFileW(hFind, &fd));
+            FindClose(hFind);
+        }
+
+        // Pass 2: When reading candidate folders to populate sessions_, SKIP any folder
+        // whose name/ID is present in knownSubagentIds_. This guarantees the island
+        // strictly tracks the Root Human Conversation!
         std::wstring directPrimary = brainScanDir_ + L"\\island_telemetry.json";
         if (std::find(outPaths.begin(), outPaths.end(), directPrimary) == outPaths.end()) {
             if (FileExists(directPrimary)) outPaths.push_back(directPrimary);
         }
 
-        std::wstring searchPattern = brainScanDir_ + L"\\*";
-        WIN32_FIND_DATAW fd;
-        HANDLE hFind = FindFirstFileW(searchPattern.c_str(), &fd);
-        if (hFind == INVALID_HANDLE_VALUE) return;
+        hFind = FindFirstFileW(searchPattern.c_str(), &fd);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            int scannedFolders = 0;
+            do {
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                    wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
+                    
+                    // Skip any folder that belongs to a known subagent
+                    if (knownSubagentIds_.find(fd.cFileName) != knownSubagentIds_.end()) {
+                        continue;
+                    }
 
-        int scannedFolders = 0;
-        do {
-            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
-                
-                std::wstring subPath = brainScanDir_ + L"\\" + fd.cFileName;
-                std::wstring cand1 = subPath + L"\\island_telemetry.json";
-                std::wstring cand2 = subPath + L"\\scratch\\island_telemetry.json";
-                std::wstring cand3 = subPath + L"\\agy_telemetry.json";
+                    std::wstring subPath = brainScanDir_ + L"\\" + fd.cFileName;
+                    std::wstring cand1 = subPath + L"\\island_telemetry.json";
+                    std::wstring cand2 = subPath + L"\\scratch\\island_telemetry.json";
+                    std::wstring cand3 = subPath + L"\\agy_telemetry.json";
 
-                if (FileExists(cand1) && std::find(outPaths.begin(), outPaths.end(), cand1) == outPaths.end()) outPaths.push_back(cand1);
-                if (FileExists(cand2) && std::find(outPaths.begin(), outPaths.end(), cand2) == outPaths.end()) outPaths.push_back(cand2);
-                if (FileExists(cand3) && std::find(outPaths.begin(), outPaths.end(), cand3) == outPaths.end()) outPaths.push_back(cand3);
+                    if (FileExists(cand1) && std::find(outPaths.begin(), outPaths.end(), cand1) == outPaths.end()) outPaths.push_back(cand1);
+                    if (FileExists(cand2) && std::find(outPaths.begin(), outPaths.end(), cand2) == outPaths.end()) outPaths.push_back(cand2);
+                    if (FileExists(cand3) && std::find(outPaths.begin(), outPaths.end(), cand3) == outPaths.end()) outPaths.push_back(cand3);
 
-                scannedFolders++;
-                if (scannedFolders > 100) break;
-            }
-        } while (FindNextFileW(hFind, &fd));
+                    scannedFolders++;
+                    if (scannedFolders > 100) break;
+                }
+            } while (FindNextFileW(hFind, &fd));
+            FindClose(hFind);
+        }
 
-        FindClose(hFind);
+        // Filter outPaths to ensure no subagent paths slipped through
+        outPaths.erase(
+            std::remove_if(outPaths.begin(), outPaths.end(),
+                [this](const std::wstring& p) {
+                    for (const auto& subId : knownSubagentIds_) {
+                        if (p.find(subId) != std::wstring::npos) return true;
+                    }
+                    return false;
+                }),
+            outPaths.end()
+        );
     }
 
     // Backward-compatibility alias
@@ -1856,7 +1967,15 @@ private:
             telem.mtimeKey = mtime;
 
             if (ParseSessionJson(content, telem)) {
+                if (!telem.activeConversationId.empty() &&
+                    knownSubagentIds_.find(telem.activeConversationId) != knownSubagentIds_.end()) {
+                    continue;
+                }
                 EnrichSessionFromBrainLocked(telem);
+                if (!telem.activeConversationId.empty() &&
+                    knownSubagentIds_.find(telem.activeConversationId) != knownSubagentIds_.end()) {
+                    continue;
+                }
                 auto dupIt = std::find_if(updatedSessions.begin(), updatedSessions.end(),
                     [&](const SessionTelemetry& u) {
                         return !u.activeConversationId.empty() && u.activeConversationId == telem.activeConversationId;

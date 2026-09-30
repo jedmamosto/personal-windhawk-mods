@@ -48,8 +48,6 @@ namespace tokens {
     // Gemini Brand Colors
     const D2D1_COLOR_F kGeminiCyan       = D2D1::ColorF(0.298f, 0.788f, 0.941f, 1.0f); // #4CC9F0
     const D2D1_COLOR_F kGeminiPurple     = D2D1::ColorF(0.608f, 0.447f, 0.796f, 1.0f); // #9B72CB
-    const D2D1_COLOR_F kAgentRoleBg      = D2D1::ColorF(0.204f, 0.780f, 0.349f, 0.15f);
-    const D2D1_COLOR_F kAgentRoleBorder  = D2D1::ColorF(0.204f, 0.780f, 0.349f, 0.35f);
 }
 
 // ============================================================================
@@ -251,236 +249,100 @@ void DrawExpandedAgyDashboard(
     // ========================================================================
     // ZONE A: Header Row (Title, Turn/Step Capsule, Status Badge)
     // ========================================================================
-    const float headerTop = rect.top + 16.0f;
-    const float headerBottom = headerTop + 24.0f;
+    const float headerTop = rect.top + 12.0f;
+    const float headerHeight = 22.0f;
+    const float headerBottom = headerTop + headerHeight;
 
     // A1. Antigravity Icon Glyph ("✦")
-    if (boldFormat) {
-        D2D1_RECT_F iconRect = D2D1::RectF(rect.left + padX, headerTop, rect.left + padX + 18.0f, headerBottom);
+    if (titleFormat) {
+        D2D1_RECT_F iconRect = D2D1::RectF(rect.left + padX, headerTop, rect.left + padX + 16.0f, headerBottom);
         titleFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         titleFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         const wchar_t kSparkle[] = L"✦";
         rt->DrawTextW(kSparkle, 1, titleFormat, iconRect, brushCyan.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
-    // A2. Clean Conversation Title
+    // A2. Turn / Step Capsule Pill
+    const float pillW = 124.0f;
+    const float pillH = 20.0f;
+    D2D1_RECT_F turnPillRect = D2D1::RectF(
+        rect.right - padX - pillW,
+        headerTop + (headerHeight - pillH) * 0.5f,
+        rect.right - padX,
+        headerTop + (headerHeight - pillH) * 0.5f + pillH
+    );
+
+    // Clean Conversation Title
     if (titleFormat) {
-        D2D1_RECT_F titleRect = D2D1::RectF(rect.left + padX + 20.0f, headerTop, rect.right - 160.0f, headerBottom);
+        D2D1_RECT_F titleRect = D2D1::RectF(rect.left + padX + 18.0f, headerTop, turnPillRect.left - 8.0f, headerBottom);
         titleFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         titleFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         const wchar_t kTitle[] = L"Personal Windhawk Mods";
         rt->DrawTextW(kTitle, static_cast<UINT32>(wcslen(kTitle)), titleFormat, titleRect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
-    // A3. Turn / Step Capsule Pill
-    const float pillW = 136.0f;
-    const float pillH = 22.0f;
-    D2D1_RECT_F turnPillRect = D2D1::RectF(
-        rect.right - padX - pillW,
-        headerTop + 1.0f,
-        rect.right - padX,
-        headerTop + 1.0f + pillH
-    );
-    rt->FillRoundedRectangle(D2D1::RoundedRect(turnPillRect, 11.0f, 11.0f), brushBentoBg.Get());
-    rt->DrawRoundedRectangle(D2D1::RoundedRect(turnPillRect, 11.0f, 11.0f), brushBentoBorder.Get(), 1.0f);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(turnPillRect, 10.0f, 10.0f), brushBentoBg.Get());
+    rt->DrawRoundedRectangle(D2D1::RoundedRect(turnPillRect, 10.0f, 10.0f), brushBentoBorder.Get(), 1.0f);
 
     // Active Green Pulsing Dot inside Turn Pill
-    D2D1_POINT_2F dotCenter = D2D1::Point2F(turnPillRect.left + 11.0f, (turnPillRect.top + turnPillRect.bottom) * 0.5f);
-    rt->FillEllipse(D2D1::Ellipse(dotCenter, 3.5f, 3.5f), brushGreen.Get());
+    D2D1_POINT_2F dotCenter = D2D1::Point2F(turnPillRect.left + 10.0f, (turnPillRect.top + turnPillRect.bottom) * 0.5f);
+    rt->FillEllipse(D2D1::Ellipse(dotCenter, 3.2f, 3.2f), brushGreen.Get());
 
     // Turn & Step Text
-    if (smallFormat) {
-        D2D1_RECT_F turnTextRect = D2D1::RectF(turnPillRect.left + 20.0f, turnPillRect.top, turnPillRect.right - 8.0f, turnPillRect.bottom);
-        smallFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        smallFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    if (microFormat) {
+        D2D1_RECT_F turnTextRect = D2D1::RectF(turnPillRect.left + 18.0f, turnPillRect.top, turnPillRect.right - 6.0f, turnPillRect.bottom);
+        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         const wchar_t kTurnStep[] = L"Turn 5 • Step 140";
-        rt->DrawTextW(kTurnStep, static_cast<UINT32>(wcslen(kTurnStep)), smallFormat, turnTextRect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        rt->DrawTextW(kTurnStep, static_cast<UINT32>(wcslen(kTurnStep)), microFormat, turnTextRect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
+    (void)bodyFormat;
+
     // ========================================================================
-    // ZONE B: Latest Message Snippet Box with Role Attribution Badge
+    // ZONE B: Context Window & Compaction Bar (HERO FEATURE - ON TOP)
     // ========================================================================
-    const float msgBoxTop = headerBottom + 10.0f;
-    const float msgBoxHeight = 50.0f;
-    D2D1_RECT_F msgBoxRect = D2D1::RectF(rect.left + padX, msgBoxTop, rect.right - padX, msgBoxTop + msgBoxHeight);
+    const float gap = 8.0f;
+    const float ctxTop = headerBottom + gap;
+    const float ctxHeight = 28.0f;
+    const float ctxBottom = ctxTop + ctxHeight;
+    D2D1_RECT_F contextRect = D2D1::RectF(rect.left + padX, ctxTop, rect.right - padX, ctxBottom);
 
-    rt->FillRoundedRectangle(D2D1::RoundedRect(msgBoxRect, 9.0f, 9.0f), brushBentoBg.Get());
-    rt->DrawRoundedRectangle(D2D1::RoundedRect(msgBoxRect, 9.0f, 9.0f), brushBentoBorder.Get(), 1.0f);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(contextRect, 8.0f, 8.0f), brushBentoBg.Get());
+    rt->DrawRoundedRectangle(D2D1::RoundedRect(contextRect, 8.0f, 8.0f), brushBentoBorder.Get(), 1.0f);
 
-    // B1. Role Badge ("AGENT" in emerald badge)
-    const float badgeLeft = msgBoxRect.left + 10.0f;
-    const float badgeTop = msgBoxRect.top + 8.0f;
-    const float badgeW = 46.0f;
-    const float badgeH = 15.0f;
-    D2D1_RECT_F badgeRect = D2D1::RectF(badgeLeft, badgeTop, badgeLeft + badgeW, badgeTop + badgeH);
-
-    ComPtr<ID2D1SolidColorBrush> agentBgBrush;
-    ComPtr<ID2D1SolidColorBrush> agentBorderBrush;
-    rt->CreateSolidColorBrush(tokens::kAgentRoleBg, &agentBgBrush);
-    rt->CreateSolidColorBrush(tokens::kAgentRoleBorder, &agentBorderBrush);
-
-    rt->FillRoundedRectangle(D2D1::RoundedRect(badgeRect, 4.0f, 4.0f), agentBgBrush.Get());
-    rt->DrawRoundedRectangle(D2D1::RoundedRect(badgeRect, 4.0f, 4.0f), agentBorderBrush.Get(), 0.8f);
-
+    // B1. Context Header Label & Numbers
     if (microFormat) {
-        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kAgentTag[] = L"AGENT";
-        rt->DrawTextW(kAgentTag, static_cast<UINT32>(wcslen(kAgentTag)), microFormat, badgeRect, brushGreen.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // B2. Relative Timestamp
-    if (microFormat) {
-        D2D1_RECT_F timeRect = D2D1::RectF(badgeRect.right + 8.0f, badgeTop, msgBoxRect.right - 10.0f, badgeTop + badgeH);
-        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kTime[] = L"Just now";
-        rt->DrawTextW(kTime, static_cast<UINT32>(wcslen(kTime)), microFormat, timeRect, brushTertiary.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // B3. Message Snippet Content
-    if (bodyFormat) {
-        D2D1_RECT_F snippetRect = D2D1::RectF(
-            msgBoxRect.left + 10.0f,
-            msgBoxRect.top + 26.0f,
-            msgBoxRect.right - 10.0f,
-            msgBoxRect.bottom - 6.0f
-        );
-        bodyFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        bodyFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-        const wchar_t kSnippet[] = L"Rendered Direct2D offscreen snapshot with zero notch border clipping.";
-        rt->DrawTextW(kSnippet, static_cast<UINT32>(wcslen(kSnippet)), bodyFormat, snippetRect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // ========================================================================
-    // ZONE C: Gemini Models Usage Limits (Dual Circular Progress Rings)
-    // ========================================================================
-    const float quotaTop = msgBoxRect.bottom + 8.0f;
-    const float quotaHeight = 64.0f;
-    const float quotaTotalWidth = (rect.right - rect.left) - padX * 2.0f;
-    const float colGap = 8.0f;
-    const float quotaCardWidth = (quotaTotalWidth - colGap) * 0.5f;
-
-    // C1. Left Card: 5-Hour Limit
-    D2D1_RECT_F fiveHrRect = D2D1::RectF(rect.left + padX, quotaTop, rect.left + padX + quotaCardWidth, quotaTop + quotaHeight);
-    rt->FillRoundedRectangle(D2D1::RoundedRect(fiveHrRect, 9.0f, 9.0f), brushBentoBg.Get());
-    rt->DrawRoundedRectangle(D2D1::RoundedRect(fiveHrRect, 9.0f, 9.0f), brushBentoBorder.Get(), 1.0f);
-
-    D2D1_POINT_2F ring5hCenter = D2D1::Point2F(fiveHrRect.left + 28.0f, (fiveHrRect.top + fiveHrRect.bottom) * 0.5f);
-    DrawCircularProgressRing(rt, factory, ring5hCenter, 18.0f, 3.2f, 0.80f, tokens::kGeminiCyan, tokens::kTrackBg);
-
-    // Percentage inside ring
-    if (boldFormat) {
-        D2D1_RECT_F pct5hRect = D2D1::RectF(ring5hCenter.x - 18.0f, ring5hCenter.y - 18.0f, ring5hCenter.x + 18.0f, ring5hCenter.y + 18.0f);
-        smallFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        smallFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kPct5h[] = L"80%";
-        rt->DrawTextW(kPct5h, static_cast<UINT32>(wcslen(kPct5h)), smallFormat, pct5hRect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // Texts to the right of ring
-    float text5hLeft = ring5hCenter.x + 26.0f;
-    if (microFormat && smallFormat) {
-        D2D1_RECT_F lbl5hRect = D2D1::RectF(text5hLeft, fiveHrRect.top + 9.0f, fiveHrRect.right - 8.0f, fiveHrRect.top + 22.0f);
-        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kLbl5h[] = L"5-HOUR LIMIT";
-        rt->DrawTextW(kLbl5h, static_cast<UINT32>(wcslen(kLbl5h)), microFormat, lbl5hRect, brushMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-        D2D1_RECT_F val5hRect = D2D1::RectF(text5hLeft, fiveHrRect.top + 23.0f, fiveHrRect.right - 8.0f, fiveHrRect.top + 39.0f);
-        boldFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        boldFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kVal5h[] = L"80% remaining";
-        rt->DrawTextW(kVal5h, static_cast<UINT32>(wcslen(kVal5h)), boldFormat, val5hRect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-        D2D1_RECT_F rst5hRect = D2D1::RectF(text5hLeft, fiveHrRect.top + 40.0f, fiveHrRect.right - 8.0f, fiveHrRect.top + 54.0f);
-        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kRst5h[] = L"Resets in 4h 27m";
-        rt->DrawTextW(kRst5h, static_cast<UINT32>(wcslen(kRst5h)), microFormat, rst5hRect, brushTertiary.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // C2. Right Card: Weekly Limit
-    D2D1_RECT_F weeklyRect = D2D1::RectF(fiveHrRect.right + colGap, quotaTop, rect.right - padX, quotaTop + quotaHeight);
-    rt->FillRoundedRectangle(D2D1::RoundedRect(weeklyRect, 9.0f, 9.0f), brushBentoBg.Get());
-    rt->DrawRoundedRectangle(D2D1::RoundedRect(weeklyRect, 9.0f, 9.0f), brushBentoBorder.Get(), 1.0f);
-
-    D2D1_POINT_2F ringWkCenter = D2D1::Point2F(weeklyRect.left + 28.0f, (weeklyRect.top + weeklyRect.bottom) * 0.5f);
-    DrawCircularProgressRing(rt, factory, ringWkCenter, 18.0f, 3.2f, 0.48f, tokens::kGeminiPurple, tokens::kTrackBg);
-
-    // Percentage inside weekly ring
-    if (smallFormat) {
-        D2D1_RECT_F pctWkRect = D2D1::RectF(ringWkCenter.x - 18.0f, ringWkCenter.y - 18.0f, ringWkCenter.x + 18.0f, ringWkCenter.y + 18.0f);
-        smallFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        smallFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kPctWk[] = L"48%";
-        rt->DrawTextW(kPctWk, static_cast<UINT32>(wcslen(kPctWk)), smallFormat, pctWkRect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // Texts to the right of weekly ring
-    float textWkLeft = ringWkCenter.x + 26.0f;
-    if (microFormat && smallFormat) {
-        D2D1_RECT_F lblWkRect = D2D1::RectF(textWkLeft, weeklyRect.top + 9.0f, weeklyRect.right - 8.0f, weeklyRect.top + 22.0f);
-        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kLblWk[] = L"WEEKLY LIMIT";
-        rt->DrawTextW(kLblWk, static_cast<UINT32>(wcslen(kLblWk)), microFormat, lblWkRect, brushMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-        D2D1_RECT_F valWkRect = D2D1::RectF(textWkLeft, weeklyRect.top + 23.0f, weeklyRect.right - 8.0f, weeklyRect.top + 39.0f);
-        boldFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        boldFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kValWk[] = L"48% remaining";
-        rt->DrawTextW(kValWk, static_cast<UINT32>(wcslen(kValWk)), boldFormat, valWkRect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-        D2D1_RECT_F rstWkRect = D2D1::RectF(textWkLeft, weeklyRect.top + 40.0f, weeklyRect.right - 8.0f, weeklyRect.top + 54.0f);
-        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kRstWk[] = L"Resets in 5d 23h";
-        rt->DrawTextW(kRstWk, static_cast<UINT32>(wcslen(kRstWk)), microFormat, rstWkRect, brushTertiary.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // ========================================================================
-    // ZONE D: Context Compaction Warning & Token Budget Track
-    // ========================================================================
-    const float contextTop = quotaTop + quotaHeight + 8.0f;
-    const float contextHeight = 36.0f;
-    D2D1_RECT_F contextRect = D2D1::RectF(rect.left + padX, contextTop, rect.right - padX, contextTop + contextHeight);
-
-    rt->FillRoundedRectangle(D2D1::RoundedRect(contextRect, 9.0f, 9.0f), brushBentoBg.Get());
-    rt->DrawRoundedRectangle(D2D1::RoundedRect(contextRect, 9.0f, 9.0f), brushBentoBorder.Get(), 1.0f);
-
-    // D1. Context Header Label & Numbers
-    if (microFormat && smallFormat) {
-        D2D1_RECT_F ctxLblRect = D2D1::RectF(contextRect.left + 10.0f, contextRect.top + 5.0f, contextRect.left + 150.0f, contextRect.top + 17.0f);
+        D2D1_RECT_F ctxLblRect = D2D1::RectF(contextRect.left + 9.0f, contextRect.top + 3.0f, contextRect.left + 120.0f, contextRect.top + 15.0f);
         microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         const wchar_t kCtxLbl[] = L"CONTEXT TOKENS";
         rt->DrawTextW(kCtxLbl, static_cast<UINT32>(wcslen(kCtxLbl)), microFormat, ctxLblRect, brushMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-        D2D1_RECT_F ctxValRect = D2D1::RectF(contextRect.right - 230.0f, contextRect.top + 5.0f, contextRect.right - 10.0f, contextRect.top + 17.0f);
+        D2D1_RECT_F ctxValRect = D2D1::RectF(contextRect.left + 120.0f, contextRect.top + 3.0f, contextRect.right - 9.0f, contextRect.top + 15.0f);
         microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
         microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kCtxVal[] = L"156k / 200k (78%) • Compaction at 80%";
-        rt->DrawTextW(kCtxVal, static_cast<UINT32>(wcslen(kCtxVal)), microFormat, ctxValRect, brushAmber.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        const wchar_t kCtxVal[] = L"122.5k / 1.0M (12%) • Compaction at 80%";
+        rt->DrawTextW(kCtxVal, static_cast<UINT32>(wcslen(kCtxVal)), microFormat, ctxValRect, brushMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
-    // D2. Progress Bar Track
-    const float barLeft = contextRect.left + 10.0f;
-    const float barRight = contextRect.right - 10.0f;
+    // B2. Progress Bar Track & 80% Threshold Hairline
+    const float barLeft = contextRect.left + 9.0f;
+    const float barRight = contextRect.right - 9.0f;
     const float barWidth = barRight - barLeft;
-    const float barTop = contextRect.top + 21.0f;
-    const float barBottom = barTop + 6.0f;
-    const float barRadius = 3.0f;
+    const float barTop = contextRect.top + 17.0f;
+    const float barBottom = barTop + 5.0f;
+    const float barRadius = 2.5f;
 
     D2D1_RECT_F trackRect = D2D1::RectF(barLeft, barTop, barRight, barBottom);
     ComPtr<ID2D1SolidColorBrush> trackBrush;
     rt->CreateSolidColorBrush(tokens::kTrackBg, &trackBrush);
     rt->FillRoundedRectangle(D2D1::RoundedRect(trackRect, barRadius, barRadius), trackBrush.Get());
 
-    // 78% Fill (Amber Warning tint as it approaches 80%)
-    const float fillWidth = barWidth * 0.78f;
+    // 12% Fill (Apple Green)
+    const float fillWidth = barWidth * 0.12f;
     D2D1_RECT_F fillRect = D2D1::RectF(barLeft, barTop, barLeft + fillWidth, barBottom);
-    rt->FillRoundedRectangle(D2D1::RoundedRect(fillRect, barRadius, barRadius), brushAmber.Get());
+    rt->FillRoundedRectangle(D2D1::RoundedRect(fillRect, barRadius, barRadius), brushGreen.Get());
 
     // 80% Threshold Hairline Indicator
     const float thresholdX = barLeft + barWidth * 0.80f;
@@ -492,6 +354,96 @@ void DrawExpandedAgyDashboard(
         threshBrush.Get(),
         1.5f
     );
+
+    // ========================================================================
+    // ZONE C: Dual Real Metrics Bento Cards (ACTIVE TIME & TOTAL ACTIONS)
+    // ========================================================================
+    const float cardsTop = ctxBottom + gap;
+    const float cardsHeight = 54.0f;
+    const float cardsBottom = cardsTop + cardsHeight;
+    const float cardsTotalWidth = (rect.right - rect.left) - padX * 2.0f;
+    const float colGap = 8.0f;
+    const float cardWidth = (cardsTotalWidth - colGap) * 0.5f;
+
+    // C1. Left Card: ACTIVE TIME
+    D2D1_RECT_F activeTimeRect = D2D1::RectF(rect.left + padX, cardsTop, rect.left + padX + cardWidth, cardsBottom);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(activeTimeRect, 8.0f, 8.0f), brushBentoBg.Get());
+    rt->DrawRoundedRectangle(D2D1::RoundedRect(activeTimeRect, 8.0f, 8.0f), brushBentoBorder.Get(), 1.0f);
+
+    D2D1_POINT_2F ring1Center = D2D1::Point2F(activeTimeRect.left + 22.0f, (activeTimeRect.top + activeTimeRect.bottom) * 0.5f);
+    const float ringRadius = 14.0f;
+    const float strokeW = 2.6f;
+    DrawCircularProgressRing(rt, factory, ring1Center, ringRadius, strokeW, 0.57f, tokens::kGeminiCyan, tokens::kTrackBg);
+
+    // Short text inside ring
+    if (microFormat) {
+        D2D1_RECT_F pct1Rect = D2D1::RectF(ring1Center.x - ringRadius, ring1Center.y - ringRadius, ring1Center.x + ringRadius, ring1Center.y + ringRadius);
+        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        const wchar_t kPct1[] = L"34m";
+        rt->DrawTextW(kPct1, static_cast<UINT32>(wcslen(kPct1)), microFormat, pct1Rect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+
+    // Texts to the right of ring
+    float text1Left = ring1Center.x + 18.0f;
+    if (microFormat && boldFormat) {
+        D2D1_RECT_F lbl1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 6.0f, activeTimeRect.right - 6.0f, activeTimeRect.top + 17.0f);
+        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        const wchar_t kLbl1[] = L"ACTIVE TIME";
+        rt->DrawTextW(kLbl1, static_cast<UINT32>(wcslen(kLbl1)), microFormat, lbl1Rect, brushMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+        D2D1_RECT_F val1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 17.0f, activeTimeRect.right - 6.0f, activeTimeRect.top + 33.0f);
+        boldFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        boldFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        const wchar_t kVal1[] = L"34m";
+        rt->DrawTextW(kVal1, static_cast<UINT32>(wcslen(kVal1)), boldFormat, val1Rect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+        D2D1_RECT_F sub1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 34.0f, activeTimeRect.right - 6.0f, activeTimeRect.bottom - 5.0f);
+        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        const wchar_t kSub1[] = L"Active";
+        rt->DrawTextW(kSub1, static_cast<UINT32>(wcslen(kSub1)), microFormat, sub1Rect, brushGreen.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+
+    // C2. Right Card: TOTAL ACTIONS
+    D2D1_RECT_F actionsRect = D2D1::RectF(activeTimeRect.right + colGap, cardsTop, rect.right - padX, cardsBottom);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(actionsRect, 8.0f, 8.0f), brushBentoBg.Get());
+    rt->DrawRoundedRectangle(D2D1::RoundedRect(actionsRect, 8.0f, 8.0f), brushBentoBorder.Get(), 1.0f);
+
+    D2D1_POINT_2F ring2Center = D2D1::Point2F(actionsRect.left + 22.0f, (actionsRect.top + actionsRect.bottom) * 0.5f);
+    DrawCircularProgressRing(rt, factory, ring2Center, ringRadius, strokeW, 1.0f, tokens::kAppleGreen, tokens::kTrackBg);
+
+    // Number of active subagents inside ring
+    if (microFormat) {
+        D2D1_RECT_F pct2Rect = D2D1::RectF(ring2Center.x - ringRadius, ring2Center.y - ringRadius, ring2Center.x + ringRadius, ring2Center.y + ringRadius);
+        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        const wchar_t kPct2[] = L"2";
+        rt->DrawTextW(kPct2, static_cast<UINT32>(wcslen(kPct2)), microFormat, pct2Rect, brushGreen.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+
+    // Texts to the right of ring
+    float text2Left = ring2Center.x + 18.0f;
+    if (microFormat && boldFormat) {
+        D2D1_RECT_F lbl2Rect = D2D1::RectF(text2Left, actionsRect.top + 6.0f, actionsRect.right - 6.0f, actionsRect.top + 17.0f);
+        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        const wchar_t kLbl2[] = L"TOTAL ACTIONS";
+        rt->DrawTextW(kLbl2, static_cast<UINT32>(wcslen(kLbl2)), microFormat, lbl2Rect, brushMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+        D2D1_RECT_F val2Rect = D2D1::RectF(text2Left, actionsRect.top + 17.0f, actionsRect.right - 6.0f, actionsRect.top + 33.0f);
+        boldFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        boldFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        const wchar_t kVal2[] = L"140 Steps";
+        rt->DrawTextW(kVal2, static_cast<UINT32>(wcslen(kVal2)), boldFormat, val2Rect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+        D2D1_RECT_F sub2Rect = D2D1::RectF(text2Left, actionsRect.top + 34.0f, actionsRect.right - 6.0f, actionsRect.bottom - 5.0f);
+        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        const wchar_t kSub2[] = L"2 Subagents Active";
+        rt->DrawTextW(kSub2, static_cast<UINT32>(wcslen(kSub2)), microFormat, sub2Rect, brushGreen.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
 }
 
 // ============================================================================
@@ -643,10 +595,10 @@ int wmain(int argc, wchar_t* argv[]) {
             D2D1::RectF(24.0f, 108.0f, 596.0f, 124.0f), labelBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
-    // Expanded Card Dimensions: 420px wide x 230px high, horizontally centered
-    const float cardW = 420.0f;
-    const float cardH = 230.0f;
-    const float cardLeft = (canvasWidth - cardW) * 0.5f; // 100.0f
+    // Expanded Card Dimensions: 380px wide x 180px high, horizontally centered
+    const float cardW = 380.0f;
+    const float cardH = 180.0f;
+    const float cardLeft = (canvasWidth - cardW) * 0.5f; // 120.0f
     const float cardTop = 136.0f;
     D2D1_RECT_F expandedCardRect = D2D1::RectF(cardLeft, cardTop, cardLeft + cardW, cardTop + cardH);
 

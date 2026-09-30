@@ -3793,7 +3793,7 @@ class Renderer {
         if (expanded) {
             radius = 18.0f * settings.sizeScale;
         } else {
-            radius = std::min(radius, 24.0f * settings.sizeScale);
+            radius = (rect.bottom - rect.top) * 0.5f;
         }
 
         DrawSoftShadow(rect, radius);
@@ -3812,118 +3812,68 @@ class Renderer {
                 D2D1::ColorF(0x4cc9f0)
             );
         } else {
-            // Compact Satellite Capsule / Extended Pill: Zero Border Clipping with R_safe Safe Margin
+            // Collapsed Satellite Notch Pill: Fully tinted pill surface with status color & glowing hairline border
             const agy::SessionTelemetry* session = g_agyTelemetry.GetActiveSession();
             float ratio = session ? session->GetRatio() : 0.0f;
             size_t runningCount = session ? (session->GetRunningSubagentsCount() + session->GetRunningTasksCount()) : 0;
             const bool isCompactionWarning = (session && session->IsCompactionWarning()) || (ratio >= 0.80f);
 
-            const float pillH = rect.bottom - rect.top;
             const float pillW = rect.right - rect.left;
-            const float pillRadius = pillH * 0.5f;
 
-            // Geometry positioning: In compact mode, center in pill. In extended mode, anchor left cap.
-            const bool showText = pillW > 70.0f * settings.sizeScale;
-            const D2D1_POINT_2F center = showText
-                ? D2D1::Point2F(rect.left + pillRadius, (rect.top + rect.bottom) * 0.5f)
-                : D2D1::Point2F((rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f);
+            // Determine status fill and border colors:
+            // - Critical Token Pressure (ratio >= 0.90f): Apple Red #FF5952, alpha ~0.40f with red pulse
+            // - Compaction Warning (ratio >= 0.80f): Apple Amber #FFB021, alpha ~0.35f, amber border
+            // - Working / Active (runningCount > 0): Apple Green #34C759, alpha 0.25f - 0.40f fill with gentle live sine pulse
+            // - Nominal / Idle Standby: Gemini Cyan #4CC9F0, alpha ~0.20f - 0.28f, cyan hairline
+            D2D1_COLOR_F statusFillColor;
+            D2D1_COLOR_F statusBorderColor;
 
-            // Strict safe margin geometry per DESIGN-agy-island-redesign spec:
-            // R_safe = 10.0px, outer ambient ring radius 9.5px, stroke 1.8px, core orb 4.0px.
-            // Minimum clearance >= 7.5px from capsule curvature is strictly preserved.
-            const float ringRadius = 9.5f * settings.sizeScale;
-            const float strokeW = 1.8f * settings.sizeScale;
-            const float orbRadius = 4.0f * settings.sizeScale;
-
-            // Clamp ring to ensure >= 7.5px clearance even on custom heights
-            const float maxClearanceRadius = std::max(6.0f * settings.sizeScale, pillRadius - 7.5f * settings.sizeScale);
-            const float actualRingRadius = std::min(ringRadius, maxClearanceRadius);
-            const float actualOrbRadius = std::min(orbRadius, actualRingRadius - 2.5f * settings.sizeScale);
-
-            // Determine status color per spec:
-            // - Telemetry compaction warning (ratio >= 0.80f): Apple Amber #FFB021
-            // - Critical token exhaustion (ratio >= 0.90f): Apple Red #FF5952 with live red pulse
-            // - Active session running subagents/tasks: Apple Green #34C759 with live pulse
-            // - Nominal idle standby: Gemini Cyan #4CC9F0
-            D2D1_COLOR_F statusColor;
             if (ratio >= 0.90f) {
-                float redPulse = 0.65f + 0.35f * std::sin(static_cast<float>(now) * 6.28318f);
-                statusColor = D2D1::ColorF(1.000f, 0.349f, 0.322f, redPulse); // Apple Red #FF5952
+                float redPulse = 0.5f + 0.5f * std::sin(static_cast<float>(now) * 6.28318f);
+                float fillAlpha = 0.32f + 0.16f * redPulse;
+                float borderAlpha = 0.75f + 0.25f * redPulse;
+                statusFillColor = D2D1::ColorF(0xFF5952, fillAlpha);
+                statusBorderColor = D2D1::ColorF(0xFF5952, borderAlpha);
             } else if (isCompactionWarning) {
-                float amberPulse = (runningCount > 0) ? (0.80f + 0.20f * std::sin(static_cast<float>(now) * 4.5f)) : 0.95f;
-                statusColor = D2D1::ColorF(1.000f, 0.690f, 0.129f, amberPulse); // Apple Amber #FFB021
+                float fillAlpha = 0.35f;
+                float borderAlpha = (runningCount > 0)
+                    ? (0.70f + 0.25f * std::sin(static_cast<float>(now) * 4.5f))
+                    : 0.85f;
+                statusFillColor = D2D1::ColorF(0xFFB021, fillAlpha);
+                statusBorderColor = D2D1::ColorF(0xFFB021, borderAlpha);
             } else if (runningCount > 0) {
-                float greenPulse = 0.80f + 0.20f * std::sin(static_cast<float>(now) * 4.5f);
-                statusColor = D2D1::ColorF(0.204f, 0.780f, 0.349f, greenPulse); // Apple Green #34C759
+                float greenPulse = 0.5f + 0.5f * std::sin(static_cast<float>(now) * 3.5f);
+                float fillAlpha = 0.25f + 0.15f * greenPulse;
+                float borderAlpha = 0.65f + 0.30f * greenPulse;
+                statusFillColor = D2D1::ColorF(0x34C759, fillAlpha);
+                statusBorderColor = D2D1::ColorF(0x34C759, borderAlpha);
             } else {
-                statusColor = D2D1::ColorF(0.298f, 0.788f, 0.941f, 0.90f); // Gemini Cyan #4CC9F0
+                statusFillColor = D2D1::ColorF(0x4CC9F0, 0.24f);
+                statusBorderColor = D2D1::ColorF(0x4CC9F0, 0.65f);
             }
 
-            // 1. Ambient Background Ring Track (opacity 0.16f)
-            ComPtr<ID2D1SolidColorBrush> ringBgBrush;
-            target_->CreateSolidColorBrush(D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.16f), &ringBgBrush);
-            target_->DrawEllipse(D2D1::Ellipse(center, actualRingRadius, actualRingRadius), ringBgBrush.Get(), strokeW);
-
-            // 2. Active Segment Arc (indicates session activity and token pressure)
-            float sweepRatio = std::clamp(ratio, 0.05f, 1.0f);
-            if (ratio < 0.01f && runningCount > 0) {
-                sweepRatio = 0.75f;
-            } else if (ratio < 0.01f) {
-                sweepRatio = 0.50f;
+            // Fill satellite notch pill surface with status color tint
+            ComPtr<ID2D1SolidColorBrush> statusFillBrush;
+            if (SUCCEEDED(target_->CreateSolidColorBrush(statusFillColor, &statusFillBrush))) {
+                FillIslandShape(rect, radius, settings.w11Style, settings.notchStyle, statusFillBrush.Get());
             }
 
-            float startAngle = -3.14159265f * 0.5f; // Top (-90 degrees)
-            if (runningCount > 0) {
-                startAngle += static_cast<float>(now * 2.0); // Gentle rotation when working
-            }
-            float sweepAngle = 2.0f * 3.14159265f * sweepRatio;
-
-            ComPtr<ID2D1SolidColorBrush> arcBrush;
-            target_->CreateSolidColorBrush(statusColor, &arcBrush);
-
-            ComPtr<ID2D1PathGeometry> arcGeom;
-            if (SUCCEEDED(d2dFactory_->CreatePathGeometry(&arcGeom))) {
-                ComPtr<ID2D1GeometrySink> sink;
-                if (SUCCEEDED(arcGeom->Open(&sink))) {
-                    const int segments = 32;
-                    sink->BeginFigure(
-                        D2D1::Point2F(center.x + std::cos(startAngle) * actualRingRadius,
-                                     center.y + std::sin(startAngle) * actualRingRadius),
-                        D2D1_FIGURE_BEGIN_HOLLOW);
-                    for (int i = 1; i <= segments; ++i) {
-                        float a = startAngle + sweepAngle * (static_cast<float>(i) / segments);
-                        sink->AddLine(D2D1::Point2F(center.x + std::cos(a) * actualRingRadius,
-                                                    center.y + std::sin(a) * actualRingRadius));
-                    }
-                    sink->EndFigure(D2D1_FIGURE_END_OPEN);
-                    sink->Close();
-
-                    ComPtr<ID2D1StrokeStyle> strokeStyle;
-                    D2D1_STROKE_STYLE_PROPERTIES strokeProps = D2D1::StrokeStyleProperties(
-                        D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
-                        D2D1_LINE_JOIN_ROUND, 10.0f, D2D1_DASH_STYLE_SOLID, 0.0f
-                    );
-                    d2dFactory_->CreateStrokeStyle(&strokeProps, nullptr, 0, &strokeStyle);
-
-                    target_->DrawGeometry(arcGeom.Get(), arcBrush.Get(), strokeW, strokeStyle.Get());
-                }
+            // Crisp 1px glowing border or hairline
+            ComPtr<ID2D1SolidColorBrush> statusBorderBrush;
+            if (SUCCEEDED(target_->CreateSolidColorBrush(statusBorderColor, &statusBorderBrush))) {
+                const float strokeW = 1.0f * settings.sizeScale;
+                const float halfStroke = strokeW * 0.5f;
+                D2D1_RECT_F borderRect = D2D1::RectF(
+                    rect.left + halfStroke,
+                    settings.notchStyle ? rect.top : (rect.top + halfStroke),
+                    rect.right - halfStroke,
+                    rect.bottom - halfStroke
+                );
+                DrawIslandShape(borderRect, radius, settings.w11Style, settings.notchStyle, statusBorderBrush.Get(), strokeW);
             }
 
-            // 3. Solid Status Orb Core (Radius 4.0px, fully contained within safe radius R_safe = 10.0px)
-            ComPtr<ID2D1SolidColorBrush> orbBrush;
-            target_->CreateSolidColorBrush(statusColor, &orbBrush);
-            target_->FillEllipse(D2D1::Ellipse(center, actualOrbRadius, actualOrbRadius), orbBrush.Get());
-
-            // 4. Specular Highlight on Orb
-            ComPtr<ID2D1SolidColorBrush> specBrush;
-            target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.65f), &specBrush);
-            const float specR = 1.2f * settings.sizeScale;
-            target_->FillEllipse(
-                D2D1::Ellipse(D2D1::Point2F(center.x - 1.2f * settings.sizeScale, center.y - 1.2f * settings.sizeScale), specR, specR),
-                specBrush.Get()
-            );
-
-            // 5. Optional Turn/Step Text Label (Extended Pill Mode)
+            // Optional Turn/Step Text Label (Extended Pill Mode)
+            const bool showText = pillW > 70.0f * settings.sizeScale;
             if (showText && smallTextFormat_) {
                 std::wstring label;
                 if (session && session->currentTurn > 0) {
@@ -3939,14 +3889,14 @@ class Renderer {
                 }
 
                 ComPtr<ID2D1SolidColorBrush> textBrush;
-                if (SUCCEEDED(target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.85f), &textBrush))) {
+                if (SUCCEEDED(target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.90f), &textBrush))) {
                     D2D1_RECT_F textRect = D2D1::RectF(
-                        center.x + actualRingRadius + 7.0f * settings.sizeScale,
+                        rect.left + 8.0f * settings.sizeScale,
                         rect.top,
-                        rect.right - 10.0f * settings.sizeScale,
+                        rect.right - 8.0f * settings.sizeScale,
                         rect.bottom
                     );
-                    smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                    smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                     smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                     target_->DrawTextW(label.c_str(), static_cast<UINT32>(label.size()),
                                        smallTextFormat_.Get(), textRect, textBrush.Get(),

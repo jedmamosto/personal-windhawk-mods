@@ -1,0 +1,29 @@
+# Build artifacts & executables
+*.exe
+*.dll
+*.o
+*.obj
+*.pdb
+*.d
+
+# Windhawk temporary dumps and logs
+*.log
+*.tmp
+*.whl
+
+# Backups & monolith snapshots
+*.bak*
+*.monolith.bak
+
+# Node dependencies & temp
+node_modules/
+
+# OS metadata
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
+
+# Antigravity & AI scratch
+.system_generated/
+scratch/
+test_*.exe

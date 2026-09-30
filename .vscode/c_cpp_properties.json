@@ -1,0 +1,26 @@
+{
+  "configurations": [
+    {
+      "name": "Windhawk (Clang)",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "C:/Program Files/Windhawk/Compiler/include/**"
+      ],
+      "defines": [
+        "UNICODE",
+        "_UNICODE",
+        "WH_MOD",
+        "NOMINMAX",
+        "WIN32_LEAN_AND_MEAN"
+      ],
+      "compilerPath": "C:/Program Files/Windhawk/Compiler/bin/clang++.exe",
+      "cStandard": "c17",
+      "cppStandard": "c++20",
+      "intelliSenseMode": "windows-clang-x64",
+      "forcedInclude": [
+        "C:/Program Files/Windhawk/Compiler/include/windhawk_api.h"
+      ]
+    }
+  ],
+  "version": 4
+}

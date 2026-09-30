@@ -1,0 +1,9 @@
+﻿---
+description: Universal project guidelines router
+globs: *
+alwaysApply: true
+---
+
+# Project Guidelines
+
+See [AGENTS.md](../../AGENTS.md) for authoritative repository rules and commands.

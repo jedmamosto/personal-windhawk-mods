@@ -58,7 +58,7 @@ namespace tokens {
 
     // Typographic Color Tokens (WCAG 2.1 AA Compliant on dark surfaces)
     constexpr D2D1_COLOR_F kTextPrimary = { 1.0f, 1.0f, 1.0f, 0.96f };
-    constexpr D2D1_COLOR_F kTextSecondary = { 1.0f, 1.0f, 1.0f, 0.54f };
+    constexpr D2D1_COLOR_F kTextSecondary = { 1.0f, 1.0f, 1.0f, 0.60f };
     constexpr D2D1_COLOR_F kTextTertiary = { 1.0f, 1.0f, 1.0f, 0.35f };
 }
 
@@ -179,14 +179,13 @@ inline void DrawLightningBolt(
     ComPtr<ID2D1GeometrySink> sink;
     if (FAILED(bolt->Open(&sink)) || !sink) return;
 
-    const float cyAdj = c.y - 0.41f * s;
-    sink->BeginFigure(D2D1::Point2F(c.x + 0.07f * s, cyAdj + 0.16f * s), D2D1_FIGURE_BEGIN_FILLED);
-    sink->AddLine(D2D1::Point2F(c.x - 0.11f * s, cyAdj + 0.44f * s));
-    sink->AddLine(D2D1::Point2F(c.x + 0.00f * s, cyAdj + 0.44f * s));
-    sink->AddLine(D2D1::Point2F(c.x - 0.06f * s, cyAdj + 0.66f * s));
-    sink->AddLine(D2D1::Point2F(c.x + 0.15f * s, cyAdj + 0.36f * s));
-    sink->AddLine(D2D1::Point2F(c.x + 0.03f * s, cyAdj + 0.36f * s));
-    sink->AddLine(D2D1::Point2F(c.x + 0.12f * s, cyAdj + 0.16f * s));
+    // Dedicated bold 15px lightning bolt glyph
+    sink->BeginFigure(D2D1::Point2F(c.x + 0.08f * s, c.y - 0.42f * s), D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddLine(D2D1::Point2F(c.x - 0.24f * s, c.y + 0.02f * s));
+    sink->AddLine(D2D1::Point2F(c.x - 0.02f * s, c.y + 0.02f * s));
+    sink->AddLine(D2D1::Point2F(c.x - 0.12f * s, c.y + 0.42f * s));
+    sink->AddLine(D2D1::Point2F(c.x + 0.22f * s, c.y - 0.02f * s));
+    sink->AddLine(D2D1::Point2F(c.x + 0.02f * s, c.y - 0.02f * s));
     sink->EndFigure(D2D1_FIGURE_END_CLOSED);
     sink->Close();
 
@@ -230,36 +229,52 @@ inline void DrawGlyphIcon(
 
     switch (card.glyphKind) {
         case BatteryGlyphKind::Battery: {
-            if (data.charging) {
-                DrawLightningBolt(target, factory, c, 13.0f * scale, brush);
-            } else {
-                // Vector battery silhouette
-                const D2D1_RECT_F body = D2D1::RectF(c.x - 0.38f * s, c.y - 0.22f * s, c.x + 0.26f * s, c.y + 0.22f * s);
-                target->DrawRoundedRectangle(D2D1::RoundedRect(body, 1.5f * scale, 1.5f * scale), brush, 1.1f);
-                target->FillRectangle(D2D1::RectF(c.x + 0.26f * s, c.y - 0.08f * s, c.x + 0.35f * s, c.y + 0.08f * s), brush);
-                if (card.fraction > 0.05f) {
-                    const float fillW = (body.right - 1.5f * scale) - (body.left + 1.5f * scale);
-                    const D2D1_RECT_F inner = D2D1::RectF(
-                        body.left + 1.5f * scale, body.top + 1.5f * scale,
-                        body.left + 1.5f * scale + fillW * BentoClamp(card.fraction, 0.0f, 1.0f), body.bottom - 1.5f * scale);
-                    target->FillRectangle(inner, brush);
-                }
+            // Card 1: Always draws a distinct 15px battery silhouette (with body, terminal cap, and level), not a lightning bolt
+            (void)data;
+            const D2D1_RECT_F body = D2D1::RectF(c.x - 0.38f * s, c.y - 0.22f * s, c.x + 0.26f * s, c.y + 0.22f * s);
+            target->DrawRoundedRectangle(D2D1::RoundedRect(body, 1.5f * scale, 1.5f * scale), brush, 1.1f);
+            target->FillRectangle(D2D1::RectF(c.x + 0.26f * s, c.y - 0.08f * s, c.x + 0.35f * s, c.y + 0.08f * s), brush);
+            if (card.fraction > 0.05f) {
+                const float fillW = (body.right - 1.5f * scale) - (body.left + 1.5f * scale);
+                const D2D1_RECT_F inner = D2D1::RectF(
+                    body.left + 1.5f * scale, body.top + 1.5f * scale,
+                    body.left + 1.5f * scale + fillW * BentoClamp(card.fraction, 0.0f, 1.0f), body.bottom - 1.5f * scale);
+                target->FillRectangle(inner, brush);
             }
             break;
         }
         case BatteryGlyphKind::Peripheral: {
             if (iconFormat) {
+                D2D1_MATRIX_3X2_F oldTransform;
+                target->GetTransform(&oldTransform);
+                // Card 2 (Bluetooth / Peripheral): Scaled to match the 15px visual bounding box of other glyphs (no oversized vertical stretch)
+                const float iconScale = (s * 0.72f) / 16.0f;
+                target->SetTransform(D2D1::Matrix3x2F::Scale(iconScale, iconScale, c) * oldTransform);
+
                 iconFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                 iconFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 const wchar_t* glyph = GetCategoryGlyph(card.accessoryCategory);
-                const D2D1_RECT_F r = D2D1::RectF(c.x - s * 0.5f, c.y - s * 0.5f, c.x + s * 0.5f, c.y + s * 0.5f);
+                const D2D1_RECT_F r = D2D1::RectF(c.x - 8.0f, c.y - 8.0f, c.x + 8.0f, c.y + 8.0f);
                 target->DrawTextW(glyph, static_cast<UINT32>(wcslen(glyph)), iconFormat, r, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
                 iconFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                iconFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+
+                target->SetTransform(oldTransform);
+            } else {
+                // Vector fallback matching 15px bounding box
+                const float hw = 0.20f * s;
+                const float hh = 0.36f * s;
+                target->DrawLine(D2D1::Point2F(c.x, c.y - hh), D2D1::Point2F(c.x, c.y + hh), brush, 1.1f * scale);
+                target->DrawLine(D2D1::Point2F(c.x - hw, c.y - hh * 0.45f), D2D1::Point2F(c.x + hw, c.y + hh * 0.45f), brush, 1.1f * scale);
+                target->DrawLine(D2D1::Point2F(c.x + hw, c.y + hh * 0.45f), D2D1::Point2F(c.x, c.y + hh), brush, 1.1f * scale);
+                target->DrawLine(D2D1::Point2F(c.x, c.y - hh), D2D1::Point2F(c.x + hw, c.y - hh * 0.45f), brush, 1.1f * scale);
+                target->DrawLine(D2D1::Point2F(c.x + hw, c.y - hh * 0.45f), D2D1::Point2F(c.x - hw, c.y + hh * 0.45f), brush, 1.1f * scale);
             }
             break;
         }
         case BatteryGlyphKind::PowerFlow: {
-            DrawLightningBolt(target, factory, c, 13.0f * scale, brush);
+            // Card 2 (Power Flow): Draws dedicated bold 15px lightning bolt glyph distinct from Card 1
+            DrawLightningBolt(target, factory, c, s, brush);
             break;
         }
         case BatteryGlyphKind::Time: {
@@ -470,15 +485,13 @@ inline void DrawBatteryBentoGrid(
     }
     cards[4].value = modeVal;
 
-    // Mode-specific load bar & tint (Silent = 0.33, Balanced = 0.66, Turbo = 1.0)
+    // Power Mode is a categorical state (keep fraction = -1.0f; no progress bar)
+    cards[4].fraction = -1.0f;
     if (wcsstr(modeVal, L"Turbo") || wcsstr(modeVal, L"High")) {
-        cards[4].fraction = 1.0f;
         cards[4].tint = tokens::kAppleAmber;
     } else if (wcsstr(modeVal, L"Silent")) {
-        cards[4].fraction = 0.33f;
         cards[4].tint = D2D1::ColorF(76.0f / 255.0f, 201.0f / 255.0f, 240.0f / 255.0f, 1.0f);
     } else {
-        cards[4].fraction = 0.66f;
         cards[4].tint = tokens::kAppleGreen;
     }
 
@@ -536,14 +549,14 @@ inline void DrawBatteryBentoGrid(
         const float textLeft = card.left + 30.0f * scale;
         const float textRight = card.right - 9.0f * scale;
 
-        // Label above value
+        // Label above value (matches Hardware Monitor mutedBrush_ 0.60f opacity without double-compounding)
         if (smallTextFormat) {
             smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
             ComPtr<ID2D1SolidColorBrush> mutedBrush;
             if (SUCCEEDED(target->CreateSolidColorBrush(
-                    BentoWithAlpha(tokens::kTextSecondary, 0.60f * opacity), &mutedBrush)) && mutedBrush) {
+                    D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.60f * opacity), &mutedBrush)) && mutedBrush) {
                 const D2D1_RECT_F lblRect = D2D1::RectF(
                     textLeft, card.top + 2.0f * scale, textRight, card.top + 15.0f * scale);
                 target->DrawTextW(m.label.c_str(), static_cast<UINT32>(m.label.size()), smallTextFormat,

@@ -1,0 +1,24 @@
+# ==========================================
+# Agent Search & Context Exclusion Gate (.agentignore)
+# Prevents ripgrep / BM25 / Vector Index Pollution
+# ==========================================
+
+# Ephemeral scratchpads & session dumps
+.gemini/antigravity/brain/*/scratch/
+.claude/reports/
+.aider*
+*.tmp
+*.log
+
+# Historical Archives & Deprecated Blueprints
+.agents/archive/
+.agents/docs/research/archive/
+docs/historical/
+
+# Build & Dependency Artifacts
+node_modules/
+dist/
+build/
+.next/
+.turbo/
+coverage/

@@ -217,7 +217,9 @@ class Renderer {
                 float satWidth = 0.0f, float satHeight = 0.0f,
                 bool isSatVisible = false, bool satExpanded = false) {
         EnsureTextFormats(settings.sizeScale, settings.fontFamily, settings.textScale);
-        const float totalContentWidth = width + (isSatVisible && satWidth > 1.0f ? (10.0f * settings.sizeScale + satWidth) : 0.0f);
+        const float satWidthNeeded = (isSatVisible && satWidth > 1.0f) ? satWidth : 0.0f;
+        const float totalContentWidth = (width >= 1.0f ? width : 0.0f) +
+            (satWidthNeeded > 0.0f ? ((width >= 1.0f ? 10.0f * settings.sizeScale : 0.0f) + satWidthNeeded) : 0.0f);
         const float totalContentHeight = std::max(height, isSatVisible ? satHeight : 0.0f);
 
         const int pixelWidth = std::max(1, static_cast<int>(std::ceil(totalContentWidth + kRenderPadX * 2.0f)));
@@ -332,7 +334,7 @@ class Renderer {
             const float satGap = 10.0f * settings.sizeScale;
             const float primaryRight = secondary ? (left + primary.width + 12.0f * settings.sizeScale + secondary->width)
                                                  : (left + width);
-            const float satLeft = primaryRight + satGap;
+            const float satLeft = (width >= 1.0f) ? (primaryRight + satGap) : left;
             const float satTop = top;
             D2D1_RECT_F satelliteRect = D2D1::RectF(satLeft, satTop, satLeft + satWidth, satTop + satHeight);
 

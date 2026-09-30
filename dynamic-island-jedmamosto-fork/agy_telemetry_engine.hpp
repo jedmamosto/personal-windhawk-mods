@@ -14,6 +14,7 @@
 #endif
 
 #include <windows.h>
+#include <tlhelp32.h>
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwrite.h>
@@ -378,6 +379,13 @@ struct Workspace {
     int changedFiles = 0;
 };
 
+// A session with running subagents/tasks without an update for > 3 minutes is considered stalled/abandoned
+constexpr uint64_t kRunningStaleThresholdSec = 180; // 3 minutes
+// A session without any updates for > 15 minutes is considered dormant
+constexpr uint64_t kSessionDormantThresholdSec = 900; // 15 minutes
+// An inactive session older than 1 hour is pruned if newer sessions exist
+constexpr uint64_t kSessionPruneThresholdSec = 3600; // 1 hour
+
 struct SessionTelemetry {
     std::wstring sourceFilePath;
     FILETIME lastWriteTime = {};
@@ -393,7 +401,37 @@ struct SessionTelemetry {
     Workspace workspace;
     std::wstring lastCompletedEvent;
     std::wstring updatedAt;
+    uint64_t updatedAtEpoch = 0;
     bool isValid = false;
+
+    uint64_t GetAgeSeconds() const {
+        FILETIME ftNow;
+        GetSystemTimeAsFileTime(&ftNow);
+        ULARGE_INTEGER uNow, uLast;
+        uNow.LowPart = ftNow.dwLowDateTime;
+        uNow.HighPart = ftNow.dwHighDateTime;
+        uLast.LowPart = lastWriteTime.dwLowDateTime;
+        uLast.HighPart = lastWriteTime.dwHighDateTime;
+
+        if (updatedAtEpoch > 0) {
+            // Convert FILETIME (100-ns intervals since Jan 1, 1601) to Unix timestamp (Jan 1, 1970)
+            uint64_t unixNow = (uNow.QuadPart >= 116444736000000000ULL)
+                ? (uNow.QuadPart - 116444736000000000ULL) / 10000000ULL
+                : 0;
+            if (unixNow >= updatedAtEpoch) {
+                return unixNow - updatedAtEpoch;
+            }
+        }
+
+        if (uNow.QuadPart >= uLast.QuadPart) {
+            return (uNow.QuadPart - uLast.QuadPart) / 10000000ULL;
+        }
+        return 0;
+    }
+
+    bool IsStale(uint64_t maxAgeSec = kSessionDormantThresholdSec) const {
+        return GetAgeSeconds() > maxAgeSec;
+    }
 
     float GetRatio() const {
         if (percentUtilized > 0.0f) {
@@ -406,6 +444,10 @@ struct SessionTelemetry {
     }
 
     size_t GetRunningSubagentsCount() const {
+        // If the session hasn't received updates in 3 minutes, running subagents are considered dead
+        if (GetAgeSeconds() > kRunningStaleThresholdSec) {
+            return 0;
+        }
         size_t c = 0;
         for (const auto& sa : activeSubagents) {
             if (sa.IsRunning()) c++;
@@ -414,6 +456,10 @@ struct SessionTelemetry {
     }
 
     size_t GetRunningTasksCount() const {
+        // If the session hasn't received updates in 3 minutes, running tasks are considered dead
+        if (GetAgeSeconds() > kRunningStaleThresholdSec) {
+            return 0;
+        }
         size_t c = 0;
         for (const auto& t : activeTasks) {
             if (t.IsRunning()) c++;
@@ -478,7 +524,19 @@ inline bool ParseSessionJson(const std::string& jsonStr, SessionTelemetry& outTe
     }
 
     outTelemetry.lastCompletedEvent = root["lastCompletedEvent"].AsWString();
-    outTelemetry.updatedAt = root["updatedAt"].AsWString();
+    if (root["updatedAt"].IsNumber()) {
+        outTelemetry.updatedAtEpoch = root["updatedAt"].AsUInt64(0);
+        wchar_t buf[32];
+        swprintf_s(buf, L"%llu", static_cast<unsigned long long>(outTelemetry.updatedAtEpoch));
+        outTelemetry.updatedAt = buf;
+    } else {
+        outTelemetry.updatedAt = root["updatedAt"].AsWString();
+        if (!outTelemetry.updatedAt.empty()) {
+            try {
+                outTelemetry.updatedAtEpoch = std::stoull(outTelemetry.updatedAt);
+            } catch (...) {}
+        }
+    }
     outTelemetry.isValid = true;
     return true;
 }
@@ -745,28 +803,83 @@ public:
         return sessions_;
     }
 
-    // Evaluates if telemetry is active (running subagents, running tasks, or update/prompt within 10 min)
+    static BOOL CALLBACK EnumAgyWndProc(HWND hwnd, LPARAM lParam) {
+        if (!IsWindowVisible(hwnd)) return TRUE;
+        wchar_t title[256] = {};
+        GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+        if (title[0] != L'\0' && wcsstr(title, L"Antigravity") != nullptr) {
+            *reinterpret_cast<HWND*>(lParam) = hwnd;
+            return FALSE;
+        }
+        return TRUE;
+    }
+
+    static bool IsAntigravityRunningCached() {
+        static ULONGLONG s_lastCheck = 0;
+        static bool s_cachedRunning = false;
+        ULONGLONG now = GetTickCount64();
+        if (now - s_lastCheck < 2500) {
+            return s_cachedRunning;
+        }
+        s_lastCheck = now;
+
+        // 1. Search top-level windows for Antigravity in title
+        HWND foundHwnd = nullptr;
+        EnumWindows(EnumAgyWndProc, reinterpret_cast<LPARAM>(&foundHwnd));
+
+        if (foundHwnd != nullptr) {
+            s_cachedRunning = true;
+            return true;
+        }
+
+        // 2. Fallback: Search processes for antigravity executable
+        HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (hSnap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W pe = { sizeof(pe) };
+            if (Process32FirstW(hSnap, &pe)) {
+                do {
+                    wchar_t lowerName[MAX_PATH] = {};
+                    wcsncpy_s(lowerName, pe.szExeFile, _TRUNCATE);
+                    for (size_t i = 0; i < wcslen(lowerName); ++i) {
+                        lowerName[i] = towlower(lowerName[i]);
+                    }
+                    if (wcsstr(lowerName, L"antigravity") != nullptr) {
+                        CloseHandle(hSnap);
+                        s_cachedRunning = true;
+                        return true;
+                    }
+                } while (Process32NextW(hSnap, &pe));
+            }
+            CloseHandle(hSnap);
+        }
+
+        s_cachedRunning = false;
+        return false;
+    }
+
+    // Evaluates if telemetry is active (running subagents, running tasks, or active IDE session)
     bool IsActive() const {
         std::lock_guard<std::mutex> lock(stateMutex_);
         if (sessions_.empty()) return false;
-        FILETIME ftNow;
-        GetSystemTimeAsFileTime(&ftNow);
-        ULARGE_INTEGER uNow;
-        uNow.LowPart = ftNow.dwLowDateTime;
-        uNow.HighPart = ftNow.dwHighDateTime;
+
+        const bool isIdeRunning = IsAntigravityRunningCached();
 
         for (const auto& s : sessions_) {
+            uint64_t age = s.GetAgeSeconds();
+
+            // Active if running subagents or tasks are within fresh threshold (<= 3 mins)
             if (s.GetRunningSubagentsCount() > 0 || s.GetRunningTasksCount() > 0) {
                 return true;
             }
-            ULARGE_INTEGER uLast;
-            uLast.LowPart = s.lastWriteTime.dwLowDateTime;
-            uLast.HighPart = s.lastWriteTime.dwHighDateTime;
-            if (uNow.QuadPart >= uLast.QuadPart) {
-                uint64_t diff100ns = uNow.QuadPart - uLast.QuadPart;
-                if (diff100ns < (600ULL * 10000000ULL)) { // 10 minutes
-                    return true;
-                }
+
+            // Active if session was updated recently within 15 minutes
+            if (age < kSessionDormantThresholdSec) {
+                return true;
+            }
+
+            // If Antigravity IDE is actively running, retain recent session (up to 45 minutes)
+            if (isIdeRunning && age < (45 * 60)) {
+                return true;
             }
         }
         return false;
@@ -1004,7 +1117,12 @@ private:
 
         std::lock_guard<std::mutex> lock(stateMutex_);
         auto it = std::find_if(sessions_.begin(), sessions_.end(),
-            [&sessionTag](const SessionTelemetry& s) { return s.sourceFilePath == sessionTag; });
+            [&sessionTag, &telem](const SessionTelemetry& s) {
+                if (!telem.activeConversationId.empty() && !s.activeConversationId.empty()) {
+                    return s.activeConversationId == telem.activeConversationId;
+                }
+                return s.sourceFilePath == sessionTag;
+            });
         if (it != sessions_.end()) {
             *it = std::move(telem);
         } else {
@@ -1015,6 +1133,17 @@ private:
             [](const SessionTelemetry& a, const SessionTelemetry& b) {
                 return a.mtimeKey > b.mtimeKey;
             });
+
+        // Prune stale sessions older than 1 hour if multiple exist
+        if (sessions_.size() > 1) {
+            sessions_.erase(
+                std::remove_if(sessions_.begin() + 1, sessions_.end(),
+                    [](const SessionTelemetry& s) {
+                        return s.IsStale(kSessionPruneThresholdSec);
+                    }),
+                sessions_.end()
+            );
+        }
 
         if (autoFollowMru_ || selectedSessionIndex_ >= sessions_.size()) {
             selectedSessionIndex_ = 0;
@@ -1086,7 +1215,15 @@ private:
                 [&path](const SessionTelemetry& s) { return s.sourceFilePath == path; });
 
             if (existingIt != sessions_.end() && existingIt->mtimeKey == mtime && existingIt->isValid) {
-                updatedSessions.push_back(*existingIt);
+                auto dupIt = std::find_if(updatedSessions.begin(), updatedSessions.end(),
+                    [&](const SessionTelemetry& u) {
+                        return !u.activeConversationId.empty() && u.activeConversationId == existingIt->activeConversationId;
+                    });
+                if (dupIt == updatedSessions.end()) {
+                    updatedSessions.push_back(*existingIt);
+                } else if (existingIt->mtimeKey > dupIt->mtimeKey) {
+                    *dupIt = *existingIt;
+                }
                 continue;
             }
 
@@ -1100,8 +1237,34 @@ private:
             telem.mtimeKey = mtime;
 
             if (ParseSessionJson(content, telem)) {
-                updatedSessions.push_back(std::move(telem));
-                changed = true;
+                auto dupIt = std::find_if(updatedSessions.begin(), updatedSessions.end(),
+                    [&](const SessionTelemetry& u) {
+                        return !u.activeConversationId.empty() && u.activeConversationId == telem.activeConversationId;
+                    });
+                if (dupIt == updatedSessions.end()) {
+                    updatedSessions.push_back(std::move(telem));
+                    changed = true;
+                } else if (telem.mtimeKey > dupIt->mtimeKey) {
+                    *dupIt = std::move(telem);
+                    changed = true;
+                }
+            }
+        }
+
+        // Preserve active in-memory pipe sessions that were received recently
+        for (const auto& existing : sessions_) {
+            if (existing.sourceFilePath == L"pipe" && !existing.IsStale(kSessionPruneThresholdSec)) {
+                auto matchIt = std::find_if(updatedSessions.begin(), updatedSessions.end(),
+                    [&](const SessionTelemetry& u) {
+                        return !u.activeConversationId.empty() && u.activeConversationId == existing.activeConversationId;
+                    });
+                if (matchIt == updatedSessions.end()) {
+                    updatedSessions.push_back(existing);
+                    changed = true;
+                } else if (existing.mtimeKey > matchIt->mtimeKey) {
+                    *matchIt = existing;
+                    changed = true;
+                }
             }
         }
 
@@ -1114,6 +1277,22 @@ private:
                 [](const SessionTelemetry& a, const SessionTelemetry& b) {
                     return a.mtimeKey > b.mtimeKey;
                 });
+
+            // Prune stale sessions older than 1 hour if multiple exist
+            if (updatedSessions.size() > 1) {
+                updatedSessions.erase(
+                    std::remove_if(updatedSessions.begin() + 1, updatedSessions.end(),
+                        [](const SessionTelemetry& s) {
+                            return s.IsStale(kSessionPruneThresholdSec);
+                        }),
+                    updatedSessions.end()
+                );
+            }
+
+            // Cap at 8 active sessions
+            if (updatedSessions.size() > 8) {
+                updatedSessions.resize(8);
+            }
 
             sessions_ = std::move(updatedSessions);
 
@@ -1130,15 +1309,24 @@ private:
     // Dedicated background worker: Listens on Named Pipe & ReadDirectoryChangesW with zero polling
     void WorkerLoop() {
         std::wstring pipeName = pipeName_;
+
+        SECURITY_DESCRIPTOR sd = {};
+        InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+        SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE);
+        SECURITY_ATTRIBUTES sa = {};
+        sa.nLength = sizeof(sa);
+        sa.lpSecurityDescriptor = &sd;
+        sa.bInheritHandle = FALSE;
+
         HANDLE hPipe = CreateNamedPipeW(
             pipeName.c_str(),
-            PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
-            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
             65536,
             65536,
-            0,
-            nullptr
+            1000,
+            &sa
         );
         hPipe_.store(hPipe);
 
@@ -1255,27 +1443,53 @@ private:
 
                 std::string payload;
                 std::vector<char> buf(65536);
-                DWORD bytesRead = 0;
-                while (true) {
-                    BOOL ok = ReadFile(hPipe, buf.data(), static_cast<DWORD>(buf.size()), &bytesRead, nullptr);
+                OVERLAPPED readOverlapped = {};
+                readOverlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+                while (running_.load()) {
+                    ResetEvent(readOverlapped.hEvent);
+                    DWORD bytesRead = 0;
+                    BOOL ok = ReadFile(hPipe, buf.data(), static_cast<DWORD>(buf.size()), &bytesRead, &readOverlapped);
+                    if (!ok) {
+                        DWORD err = GetLastError();
+                        if (err == ERROR_IO_PENDING) {
+                            HANDLE waitRead[2] = { stopEvent_, readOverlapped.hEvent };
+                            DWORD rWait = WaitForMultipleObjects(2, waitRead, FALSE, 1000);
+                            if (rWait == WAIT_OBJECT_0 + 1) {
+                                if (GetOverlappedResult(hPipe, &readOverlapped, &bytesRead, FALSE)) {
+                                    ok = TRUE;
+                                }
+                            } else {
+                                CancelIoEx(hPipe, &readOverlapped);
+                                break;
+                            }
+                        } else if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED) {
+                            break;
+                        }
+                    }
+
                     if (ok && bytesRead > 0) {
                         payload.append(buf.data(), bytesRead);
-                        break;
-                    } else if (!ok && GetLastError() == ERROR_MORE_DATA) {
-                        payload.append(buf.data(), bytesRead);
+                        // Check if payload is completed (newline terminated or valid JSON)
+                        if (!payload.empty() && (payload.back() == '\n' || payload.back() == '}')) {
+                            json::Value testVal;
+                            if (json::Parse(payload, testVal)) {
+                                break;
+                            }
+                        }
                     } else {
                         break;
                     }
+                }
+
+                if (readOverlapped.hEvent) {
+                    CloseHandle(readOverlapped.hEvent);
                 }
 
                 if (!payload.empty()) {
                     if (IngestJsonPayload(payload, L"pipe")) {
                         NotifyLayoutChanged();
                     }
-                    const char ack[] = "{\"status\":\"ok\"}\n";
-                    DWORD written = 0;
-                    WriteFile(hPipe, ack, sizeof(ack) - 1, &written, nullptr);
-                    FlushFileBuffers(hPipe);
                 }
 
                 DisconnectNamedPipe(hPipe);
@@ -1513,12 +1727,15 @@ private:
             target->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.05f), &chipBg);
             target->FillRoundedRectangle(D2D1::RoundedRect(chipRect, 4.0f * scale, 4.0f * scale), chipBg.Get());
 
+            const bool isFresh = session && (session->GetAgeSeconds() <= kRunningStaleThresholdSec);
             D2D1_COLOR_F dotColor = D2D1::ColorF(1.0f, 0.624f, 0.039f, 0.9f);
-            if (sa.IsRunning()) {
+            if (sa.IsRunning() && isFresh) {
                 float pulse = 0.70f + 0.30f * std::sin(static_cast<float>(now) * 4.0f);
                 dotColor = D2D1::ColorF(0.204f, 0.780f, 0.349f, pulse);
             } else if (sa.IsErrored()) {
                 dotColor = D2D1::ColorF(1.0f, 0.271f, 0.227f, 1.0f);
+            } else if (sa.IsRunning() && !isFresh) {
+                dotColor = D2D1::ColorF(0.6f, 0.6f, 0.6f, 0.6f);
             }
 
             ComPtr<ID2D1SolidColorBrush> dotBrush;
@@ -1535,7 +1752,8 @@ private:
                                  textWhite, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
                 smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-                target->DrawText(sa.state.c_str(), static_cast<UINT32>(sa.state.size()), smallTextFormat,
+                std::wstring displayState = (sa.IsRunning() && !isFresh) ? L"stalled" : sa.state;
+                target->DrawText(displayState.c_str(), static_cast<UINT32>(displayState.size()), smallTextFormat,
                                  D2D1::RectF(chipRect.right - 52.0f * scale, chipRect.top,
                                              chipRect.right - 6.0f * scale, chipRect.bottom),
                                  dotBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);

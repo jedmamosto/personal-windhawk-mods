@@ -2598,6 +2598,7 @@ inline LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
         case WM_APP_LAYOUT_CHANGED:
             g_layoutDirty = true;
+            g_autoHiddenParked = false;
             return 0;
 
         case WM_SETCURSOR:
@@ -2814,8 +2815,15 @@ inline LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                             g_layoutDirty = true;
                             return 0;
                         }
+                        FocusAntigravityWindow();
+                        return 0;
                     }
-                    FocusAntigravityWindow();
+                    if (!g_settings.expandOnHover) {
+                        g_satelliteClickExpanded.store(true);
+                        g_layoutDirty = true;
+                    } else {
+                        FocusAntigravityWindow();
+                    }
                     return 0;
                 }
 
@@ -3588,7 +3596,18 @@ inline DWORD WINAPI RenderThreadProc(void*) {
         if (g_satelliteActive.load() && satWidthSpring.value > 10.0f) {
             satHover = PtInRect(&g_satelliteClientRect, cursorClient) != FALSE;
         }
-        bool satExpanded = g_settings.expandOnHover ? satHover : (satHover && g_satelliteClickExpanded.load());
+        bool satExpanded = false;
+        if (g_settings.expandOnHover) {
+            satExpanded = satHover;
+        } else {
+            if (g_satelliteClickExpanded.load()) {
+                if (satHover) {
+                    satExpanded = true;
+                } else {
+                    g_satelliteClickExpanded.store(false);
+                }
+            }
+        }
         if (pinned) {
             satExpanded = true;
         }
@@ -3960,7 +3979,9 @@ inline DWORD WINAPI RenderThreadProc(void*) {
         // so the shrink still animates before we cut over to OS-hidden.
         const bool wantsAutoHiddenPark =
             !g_manuallyHidden.load() && !pinned && !isHoverExpanded && !isTransientAlert &&
-            !privacyActive && (isHidden || fullscreenSuppressed) &&
+            !privacyActive && !agyActive && !isSatVisible &&
+            satWidthSpring.value < 0.5f && satWidthSpring.target < 0.5f &&
+            (isHidden || fullscreenSuppressed) &&
             widthSpring.value < 0.5f && heightSpring.value < 0.5f &&
             std::fabs(widthSpring.velocity) < 0.5f && std::fabs(heightSpring.velocity) < 0.5f;
 

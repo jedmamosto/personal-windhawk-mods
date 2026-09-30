@@ -5,6 +5,8 @@
 *.obj
 *.pdb
 *.d
+*.pch
+*.gch
 
 # Windhawk temporary dumps and logs
 *.log

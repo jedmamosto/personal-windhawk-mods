@@ -553,6 +553,7 @@ inline void DrawBatteryBentoGrid(
         if (smallTextFormat) {
             smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            smallTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
             ComPtr<ID2D1SolidColorBrush> mutedBrush;
             if (SUCCEEDED(target->CreateSolidColorBrush(
@@ -569,6 +570,7 @@ inline void DrawBatteryBentoGrid(
         if (textFormat) {
             textFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             textFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            textFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
             ComPtr<ID2D1SolidColorBrush> textBrush;
             if (SUCCEEDED(target->CreateSolidColorBrush(

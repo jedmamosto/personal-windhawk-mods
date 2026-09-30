@@ -12,6 +12,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#if __has_include("dynamic_island_pch.hpp")
+#include "dynamic_island_pch.hpp"
+#endif
 
 #include <windows.h>
 #include <d2d1.h>
@@ -125,6 +128,142 @@ namespace FileTrayLayout {
         return capacity < 1 ? 1 : capacity;
     }
 }
+
+// ============================================================================
+// Zero-Allocation Direct2D Micro-Layout DSL
+// Lean, zero-allocation inline constexpr geometry helpers inspired by
+// immediate-mode GUI toolkits (Dear ImGui) for deterministic card partitioning.
+// ============================================================================
+#ifdef InsetRect
+#undef InsetRect
+#endif
+
+namespace island_layout {
+
+// Inset a rectangle uniformly or with distinct horizontal/vertical padding.
+[[nodiscard]] inline constexpr D2D1_RECT_F InsetRect(const D2D1_RECT_F& r, float dx, float dy) noexcept {
+    return D2D1_RECT_F{ r.left + dx, r.top + dy, r.right - dx, r.bottom - dy };
+}
+
+[[nodiscard]] inline constexpr D2D1_RECT_F InsetRect(const D2D1_RECT_F& r, float left, float top, float right, float bottom) noexcept {
+    return D2D1_RECT_F{ r.left + left, r.top + top, r.right - right, r.bottom - bottom };
+}
+
+[[nodiscard]] inline constexpr D2D1_RECT_F InsetRect(const D2D1_RECT_F& r, float inset) noexcept {
+    return D2D1_RECT_F{ r.left + inset, r.top + inset, r.right - inset, r.bottom - inset };
+}
+
+// Slice a rectangle vertically into 3 distinct bands: top, middle, bottom.
+// Zero-allocation POD container holding the 3 partitioned rectangle bands.
+struct VerticalSlice3 {
+    D2D1_RECT_F top;
+    D2D1_RECT_F middle;
+    D2D1_RECT_F bottom;
+};
+
+// Partitions `r` where top has height `topHeight`, bottom has height `bottomHeight`,
+// and middle fills the remaining vertical space.
+[[nodiscard]] inline constexpr VerticalSlice3 SliceVertical3(
+    const D2D1_RECT_F& r,
+    float topHeight,
+    float bottomHeight) noexcept
+{
+    return VerticalSlice3{
+        D2D1_RECT_F{ r.left, r.top, r.right, r.top + topHeight },
+        D2D1_RECT_F{ r.left, r.top + topHeight, r.right, r.bottom - bottomHeight },
+        D2D1_RECT_F{ r.left, r.bottom - bottomHeight, r.right, r.bottom }
+    };
+}
+
+// Partitions `r` with explicit heights for top, middle, and bottom bands.
+[[nodiscard]] inline constexpr VerticalSlice3 SliceVertical3(
+    const D2D1_RECT_F& r,
+    float topHeight,
+    float middleHeight,
+    float bottomHeight) noexcept
+{
+    const float midTop = r.top + topHeight;
+    return VerticalSlice3{
+        D2D1_RECT_F{ r.left, r.top, r.right, midTop },
+        D2D1_RECT_F{ r.left, midTop, r.right, midTop + middleHeight },
+        D2D1_RECT_F{ r.left, midTop + middleHeight, r.right, midTop + middleHeight + bottomHeight }
+    };
+}
+
+// Slice a rectangle horizontally into 2 columns with an optional gap.
+struct HorizontalSlice2 {
+    D2D1_RECT_F left;
+    D2D1_RECT_F right;
+};
+
+[[nodiscard]] inline constexpr HorizontalSlice2 SliceHorizontal2(
+    const D2D1_RECT_F& r,
+    float leftWidth,
+    float gap = 0.0f) noexcept
+{
+    return HorizontalSlice2{
+        D2D1_RECT_F{ r.left, r.top, r.left + leftWidth, r.bottom },
+        D2D1_RECT_F{ r.left + leftWidth + gap, r.top, r.right, r.bottom }
+    };
+}
+
+// Mathematically centers a box of size (width, height) within a container rectangle.
+[[nodiscard]] inline constexpr D2D1_RECT_F CenterBox(
+    const D2D1_RECT_F& container,
+    float width,
+    float height) noexcept
+{
+    const float cx = (container.left + container.right) * 0.5f;
+    const float cy = (container.top + container.bottom) * 0.5f;
+    const float hw = width * 0.5f;
+    const float hh = height * 0.5f;
+    return D2D1_RECT_F{ cx - hw, cy - hh, cx + hw, cy + hh };
+}
+
+// Mathematically centers a square box of diameter `size` at center point `c`.
+[[nodiscard]] inline constexpr D2D1_RECT_F CenterBox(
+    D2D1_POINT_2F center,
+    float size) noexcept
+{
+    const float half = size * 0.5f;
+    return D2D1_RECT_F{ center.x - half, center.y - half, center.x + half, center.y + half };
+}
+
+// Mathematically centers a square box within a container rectangle.
+[[nodiscard]] inline constexpr D2D1_RECT_F CenterBox(
+    const D2D1_RECT_F& container,
+    float size) noexcept
+{
+    return CenterBox(container, size, size);
+}
+
+// Center point of a rectangle.
+[[nodiscard]] inline constexpr D2D1_POINT_2F RectCenter(const D2D1_RECT_F& r) noexcept {
+    return D2D1_POINT_2F{ (r.left + r.right) * 0.5f, (r.top + r.bottom) * 0.5f };
+}
+
+// Width of a rectangle.
+[[nodiscard]] inline constexpr float RectWidth(const D2D1_RECT_F& r) noexcept {
+    return r.right - r.left;
+}
+
+// Height of a rectangle.
+[[nodiscard]] inline constexpr float RectHeight(const D2D1_RECT_F& r) noexcept {
+    return r.bottom - r.top;
+}
+
+} // namespace island_layout
+
+// Promote micro-layout helpers into island common scope
+using island_layout::InsetRect;
+using island_layout::SliceVertical3;
+using island_layout::SliceHorizontal2;
+using island_layout::CenterBox;
+using island_layout::RectCenter;
+using island_layout::RectWidth;
+using island_layout::RectHeight;
+using island_layout::VerticalSlice3;
+using island_layout::HorizontalSlice2;
 
 // Layout for the collapsed idle strip (the clock, and optionally a weather
 // reading beside it).

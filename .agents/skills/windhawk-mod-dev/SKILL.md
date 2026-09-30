@@ -25,7 +25,9 @@ This skill guides the design, implementation, modularization, and verification o
 - **Companion Header Invariant**: DO NOT write new multi-thousand-line subsystems directly inside the master `.wh.cpp`. ALWAYS scaffold features in standalone `.hpp` files and link via `@compilerOptions -I`.
 - **Graceful Sensor Degradation Invariant**: DO NOT assume Windows services (`lfsvc`, PDH, WinRT) are active. ALWAYS handle errors defensively (e.g. `0x80070422` disabled service) with tiered fallbacks.
 - **Direct2D Layered Window Invariant**: DO NOT paint outer bounding shadows that clip against dark desktop windows. ALWAYS ensure alpha channels clear to `0.0f` and keep silhouettes borderless or sub-pixel hairline.
-- **Compilation Gate Invariant**: DO NOT declare a mod change complete without running syntax verification. ALWAYS run `verify_mod.ps1` or `Ctrl+Shift+B` and achieve exit code `0`.
+- **Micro-Layout DSL Invariant**: DO NOT compute manual Cartesian floating-point coordinate offsets line-by-line. ALWAYS use `SliceVertical3`, `CenterBox`, and `InsetRect` from `island_common.hpp`.
+- **PCH-Accelerated Verification Invariant**: ALWAYS run `powershell -File dynamic-island-jedmamosto-fork\verify_mod.ps1` to achieve sub-second syntax verification with PCH auto-detection.
+- **Compilation Gate Invariant**: DO NOT declare a mod change complete without running syntax verification. ALWAYS achieve exit code `0`.
 - **UTF-8 Clipboard Invariant**: DO NOT copy multi-megabyte mod sources through raw shell buffers. ALWAYS use `node copy_to_clip.js` to preserve encoding without character truncation.
 
 ---

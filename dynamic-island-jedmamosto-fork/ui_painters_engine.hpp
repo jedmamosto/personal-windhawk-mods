@@ -3812,88 +3812,146 @@ class Renderer {
                 D2D1::ColorF(0x4cc9f0)
             );
         } else {
-            // Compact Satellite Capsule: [ 🌀 5% ] or Pulsing Orb + Running Dot
+            // Compact Satellite Capsule / Extended Pill: Zero Border Clipping with R_safe Safe Margin
             const agy::SessionTelemetry* session = g_agyTelemetry.GetActiveSession();
             float ratio = session ? session->GetRatio() : 0.0f;
             size_t runningCount = session ? (session->GetRunningSubagentsCount() + session->GetRunningTasksCount()) : 0;
+            const bool isCompactionWarning = (session && session->IsCompactionWarning()) || (ratio >= 0.80f);
 
-            const D2D1_POINT_2F center = D2D1::Point2F(
-                (rect.left + rect.right) * 0.5f,
-                (rect.top + rect.bottom) * 0.5f
-            );
+            const float pillH = rect.bottom - rect.top;
+            const float pillW = rect.right - rect.left;
+            const float pillRadius = pillH * 0.5f;
 
-            const float ringRadius = std::min(14.0f * settings.sizeScale, (rect.bottom - rect.top) * 0.36f);
-            const float strokeW = 2.4f * settings.sizeScale;
+            // Geometry positioning: In compact mode, center in pill. In extended mode, anchor left cap.
+            const bool showText = pillW > 70.0f * settings.sizeScale;
+            const D2D1_POINT_2F center = showText
+                ? D2D1::Point2F(rect.left + pillRadius, (rect.top + rect.bottom) * 0.5f)
+                : D2D1::Point2F((rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f);
 
-            ComPtr<ID2D1SolidColorBrush> trackBrush;
-            target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f), &trackBrush);
-            target_->DrawEllipse(D2D1::Ellipse(center, ringRadius, ringRadius), trackBrush.Get(), strokeW);
+            // Strict safe margin geometry per DESIGN-agy-island-redesign spec:
+            // R_safe = 10.0px, outer ambient ring radius 9.5px, stroke 1.8px, core orb 4.0px.
+            // Minimum clearance >= 7.5px from capsule curvature is strictly preserved.
+            const float ringRadius = 9.5f * settings.sizeScale;
+            const float strokeW = 1.8f * settings.sizeScale;
+            const float orbRadius = 4.0f * settings.sizeScale;
 
-            D2D1_COLOR_F gaugeColor = agy::GetTokenGaugeColor(ratio, now);
-            if (ratio < 0.01f && runningCount > 0) {
-                gaugeColor = D2D1::ColorF(0.204f, 0.780f, 0.349f, 0.95f);
+            // Clamp ring to ensure >= 7.5px clearance even on custom heights
+            const float maxClearanceRadius = std::max(6.0f * settings.sizeScale, pillRadius - 7.5f * settings.sizeScale);
+            const float actualRingRadius = std::min(ringRadius, maxClearanceRadius);
+            const float actualOrbRadius = std::min(orbRadius, actualRingRadius - 2.5f * settings.sizeScale);
+
+            // Determine status color per spec:
+            // - Telemetry compaction warning (ratio >= 0.80f): Apple Amber #FFB021
+            // - Critical token exhaustion (ratio >= 0.90f): Apple Red #FF5952 with live red pulse
+            // - Active session running subagents/tasks: Apple Green #34C759 with live pulse
+            // - Nominal idle standby: Gemini Cyan #4CC9F0
+            D2D1_COLOR_F statusColor;
+            if (ratio >= 0.90f) {
+                float redPulse = 0.65f + 0.35f * std::sin(static_cast<float>(now) * 6.28318f);
+                statusColor = D2D1::ColorF(1.000f, 0.349f, 0.322f, redPulse); // Apple Red #FF5952
+            } else if (isCompactionWarning) {
+                float amberPulse = (runningCount > 0) ? (0.80f + 0.20f * std::sin(static_cast<float>(now) * 4.5f)) : 0.95f;
+                statusColor = D2D1::ColorF(1.000f, 0.690f, 0.129f, amberPulse); // Apple Amber #FFB021
+            } else if (runningCount > 0) {
+                float greenPulse = 0.80f + 0.20f * std::sin(static_cast<float>(now) * 4.5f);
+                statusColor = D2D1::ColorF(0.204f, 0.780f, 0.349f, greenPulse); // Apple Green #34C759
+            } else {
+                statusColor = D2D1::ColorF(0.298f, 0.788f, 0.941f, 0.90f); // Gemini Cyan #4CC9F0
             }
 
-            float pulse = 1.0f;
-            if (runningCount > 0) {
-                pulse = 0.75f + 0.25f * std::sin(static_cast<float>(now) * 4.5f);
-                gaugeColor.a *= pulse;
-            }
+            // 1. Ambient Background Ring Track (opacity 0.16f)
+            ComPtr<ID2D1SolidColorBrush> ringBgBrush;
+            target_->CreateSolidColorBrush(D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.16f), &ringBgBrush);
+            target_->DrawEllipse(D2D1::Ellipse(center, actualRingRadius, actualRingRadius), ringBgBrush.Get(), strokeW);
 
-            ComPtr<ID2D1SolidColorBrush> arcBrush;
-            target_->CreateSolidColorBrush(gaugeColor, &arcBrush);
-
+            // 2. Active Segment Arc (indicates session activity and token pressure)
             float sweepRatio = std::clamp(ratio, 0.05f, 1.0f);
-            if (ratio < 0.01f && runningCount > 0) sweepRatio = 0.75f;
+            if (ratio < 0.01f && runningCount > 0) {
+                sweepRatio = 0.75f;
+            } else if (ratio < 0.01f) {
+                sweepRatio = 0.50f;
+            }
 
-            float startAngle = -3.14159265f * 0.5f;
+            float startAngle = -3.14159265f * 0.5f; // Top (-90 degrees)
             if (runningCount > 0) {
-                startAngle += static_cast<float>(now * 2.0);
+                startAngle += static_cast<float>(now * 2.0); // Gentle rotation when working
             }
             float sweepAngle = 2.0f * 3.14159265f * sweepRatio;
+
+            ComPtr<ID2D1SolidColorBrush> arcBrush;
+            target_->CreateSolidColorBrush(statusColor, &arcBrush);
 
             ComPtr<ID2D1PathGeometry> arcGeom;
             if (SUCCEEDED(d2dFactory_->CreatePathGeometry(&arcGeom))) {
                 ComPtr<ID2D1GeometrySink> sink;
                 if (SUCCEEDED(arcGeom->Open(&sink))) {
-                    const int segments = 24;
+                    const int segments = 32;
                     sink->BeginFigure(
-                        D2D1::Point2F(center.x + std::cos(startAngle) * ringRadius,
-                                     center.y + std::sin(startAngle) * ringRadius),
+                        D2D1::Point2F(center.x + std::cos(startAngle) * actualRingRadius,
+                                     center.y + std::sin(startAngle) * actualRingRadius),
                         D2D1_FIGURE_BEGIN_HOLLOW);
                     for (int i = 1; i <= segments; ++i) {
                         float a = startAngle + sweepAngle * (static_cast<float>(i) / segments);
-                        sink->AddLine(D2D1::Point2F(center.x + std::cos(a) * ringRadius,
-                                                    center.y + std::sin(a) * ringRadius));
+                        sink->AddLine(D2D1::Point2F(center.x + std::cos(a) * actualRingRadius,
+                                                    center.y + std::sin(a) * actualRingRadius));
                     }
                     sink->EndFigure(D2D1_FIGURE_END_OPEN);
                     sink->Close();
-                    target_->DrawGeometry(arcGeom.Get(), arcBrush.Get(), strokeW);
+
+                    ComPtr<ID2D1StrokeStyle> strokeStyle;
+                    D2D1_STROKE_STYLE_PROPERTIES strokeProps = D2D1::StrokeStyleProperties(
+                        D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                        D2D1_LINE_JOIN_ROUND, 10.0f, D2D1_DASH_STYLE_SOLID, 0.0f
+                    );
+                    d2dFactory_->CreateStrokeStyle(&strokeProps, nullptr, 0, &strokeStyle);
+
+                    target_->DrawGeometry(arcGeom.Get(), arcBrush.Get(), strokeW, strokeStyle.Get());
                 }
             }
 
-            const float orbRadius = 4.0f * settings.sizeScale;
+            // 3. Solid Status Orb Core (Radius 4.0px, fully contained within safe radius R_safe = 10.0px)
             ComPtr<ID2D1SolidColorBrush> orbBrush;
-            target_->CreateSolidColorBrush(
-                runningCount > 0 ? D2D1::ColorF(0.204f, 0.780f, 0.349f, 0.95f)
-                                 : D2D1::ColorF(0.30f, 0.79f, 0.94f, 0.90f),
-                &orbBrush);
-            target_->FillEllipse(D2D1::Ellipse(center, orbRadius, orbRadius), orbBrush.Get());
+            target_->CreateSolidColorBrush(statusColor, &orbBrush);
+            target_->FillEllipse(D2D1::Ellipse(center, actualOrbRadius, actualOrbRadius), orbBrush.Get());
 
-            if (session && session->GetRunningSubagentsCount() > 0) {
-                const float dotR = 2.8f * settings.sizeScale;
-                const D2D1_POINT_2F dotPt = D2D1::Point2F(
-                    center.x + ringRadius * 0.707f + 2.0f,
-                    center.y - ringRadius * 0.707f - 2.0f
-                );
-                float dotPulse = 0.70f + 0.30f * std::sin(static_cast<float>(now) * 5.0f);
-                ComPtr<ID2D1SolidColorBrush> dotBrush;
-                target_->CreateSolidColorBrush(D2D1::ColorF(0.204f, 0.780f, 0.349f, dotPulse), &dotBrush);
-                target_->FillEllipse(D2D1::Ellipse(dotPt, dotR, dotR), dotBrush.Get());
+            // 4. Specular Highlight on Orb
+            ComPtr<ID2D1SolidColorBrush> specBrush;
+            target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.65f), &specBrush);
+            const float specR = 1.2f * settings.sizeScale;
+            target_->FillEllipse(
+                D2D1::Ellipse(D2D1::Point2F(center.x - 1.2f * settings.sizeScale, center.y - 1.2f * settings.sizeScale), specR, specR),
+                specBrush.Get()
+            );
 
-                ComPtr<ID2D1SolidColorBrush> dotRim;
-                target_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.9f), &dotRim);
-                target_->DrawEllipse(D2D1::Ellipse(dotPt, dotR, dotR), dotRim.Get(), 0.8f);
+            // 5. Optional Turn/Step Text Label (Extended Pill Mode)
+            if (showText && smallTextFormat_) {
+                std::wstring label;
+                if (session && session->currentTurn > 0) {
+                    wchar_t buf[64];
+                    if (session->currentStep > 0) {
+                        swprintf_s(buf, L"Turn %d • Step %d", session->currentTurn, session->currentStep);
+                    } else {
+                        swprintf_s(buf, L"Turn %d", session->currentTurn);
+                    }
+                    label = buf;
+                } else {
+                    label = L"AGY 2.0";
+                }
+
+                ComPtr<ID2D1SolidColorBrush> textBrush;
+                if (SUCCEEDED(target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.85f), &textBrush))) {
+                    D2D1_RECT_F textRect = D2D1::RectF(
+                        center.x + actualRingRadius + 7.0f * settings.sizeScale,
+                        rect.top,
+                        rect.right - 10.0f * settings.sizeScale,
+                        rect.bottom
+                    );
+                    smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                    smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    target_->DrawTextW(label.c_str(), static_cast<UINT32>(label.size()),
+                                       smallTextFormat_.Get(), textRect, textBrush.Get(),
+                                       D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                }
             }
         }
     }

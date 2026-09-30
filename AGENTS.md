@@ -16,6 +16,7 @@ The primary codebase is `dynamic-island-jedmamosto-fork`, utilizing hardware-acc
 - **Verify Build (Fast PCH)**: Run `powershell -File dynamic-island-jedmamosto-fork\verify_mod.ps1`.
 - **Rebuild PCH**: Run `dynamic-island-jedmamosto-fork\build_pch.bat` when Windows SDK headers change.
 - **Clipboard Sync**: Run `node dynamic-island-jedmamosto-fork\copy_to_clip.js` to bundle source for Windhawk.
+- **Render Direct2D Snapshot**: Run `dynamic-island-jedmamosto-fork\render_snapshot.bat` (or `.tools\render_*.bat`) to compile the offscreen WIC Direct2D test harness and produce pixel-perfect PNG snapshots.
 
 ## 3. Directory Taxonomy
 
@@ -41,6 +42,7 @@ The primary codebase is `dynamic-island-jedmamosto-fork`, utilizing hardware-acc
 5. **No Message Queue Blocking**: Perform background network, G-Helper file IO, and IOCTL requests on worker threads.
 6. **Declarative Micro-Layout**: Use `SliceVertical3`, `CenterBox`, and `InsetRect` in `island_common.hpp` instead of raw Cartesian math.
 7. **PCH-Accelerated Verification**: Run `verify_mod.ps1` with PCH detection to confirm clean compilation (exit code 0).
+8. **Native Direct2D Snapshot Verification**: For all Direct2D UI changes, layout redesigns, and visual mockups, ALWAYS utilize the project's native C++ offscreen WIC snapshot pipeline (`.tools/render_snapshot.cpp`) to compile and emit real PNG renders with genuine DirectWrite typography, rather than approximating with external HTML mockups or AI-generated images.
 
 ## 5. Documentation Standards
 

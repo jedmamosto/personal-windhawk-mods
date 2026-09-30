@@ -1,6 +1,7 @@
 ---
 name: windhawk-mod-dev
 description: Interactive workflow to design, scaffold, modify, refactor, modularize, and verify Windows desktop mods using the Windhawk Clang++ toolchain and Windows system APIs (Direct2D, WinRT, PDH, Power Management). Make sure to use this skill whenever creating a new Windhawk mod, editing or upgrading existing mods in 'Personal Windhawk Mods', resolving Windhawk compilation or macro errors, designing split-island Direct2D overlays, or adding system telemetry sensors, even if not explicitly named.
+version: 1.1.0
 ---
 
 # Windhawk Mod Developer: Antigravity Workspace Specialist
@@ -29,6 +30,7 @@ This skill guides the design, implementation, modularization, and verification o
 - **PCH-Accelerated Verification Invariant**: ALWAYS run `powershell -File dynamic-island-jedmamosto-fork\verify_mod.ps1` to achieve sub-second syntax verification with PCH auto-detection.
 - **Compilation Gate Invariant**: DO NOT declare a mod change complete without running syntax verification. ALWAYS achieve exit code `0`.
 - **UTF-8 Clipboard Invariant**: DO NOT copy multi-megabyte mod sources through raw shell buffers. ALWAYS use `node copy_to_clip.js` to preserve encoding without character truncation.
+- **Direct2D Snapshot Invariant**: DO NOT mock or visually verify Direct2D UI changes using generic HTML mockups or AI image generation. ALWAYS use the project's native C++ WIC snapshot renderer (`.tools/render_snapshot.cpp` / `render_snapshot.bat`) to produce offscreen, pixel-perfect PNG snapshots.
 
 ---
 
@@ -43,6 +45,11 @@ This skill guides the design, implementation, modularization, and verification o
 2. Add `@compilerOptions -I"<folder>"` to the `.wh.cpp` header so Windhawk finds the files during internal compilation.
 3. Integrate hook points inside `Wh_ModInit` and the main render loop.
 4. Consult [references/windows-apis.md](./references/windows-apis.md) for sensor recipes (PDH, WinRT, Location).
+
+### Step 2.5: Visual UI Snapshot Verification (When modifying UI)
+1. When altering Direct2D layout or designing UI mockups, author or update a standalone offscreen test harness in `.tools/` (e.g. `render_snapshot.cpp`).
+2. Compile and run via `render_snapshot.bat` to emit a genuine WIC-rendered PNG snapshot.
+3. Inspect the snapshot to verify padding, text wrapping, and alignment before merging into production headers.
 
 ### Step 3: Verify Compilation
 1. Run syntax verification using Windhawk Clang++:

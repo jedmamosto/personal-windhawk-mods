@@ -24,6 +24,7 @@
 #include <endpointvolume.h>
 #include <mmdeviceapi.h>
 #include <wrl/client.h>
+#include <tlhelp32.h>
 
 #include <string>
 #include <vector>
@@ -198,6 +199,92 @@ inline int GetDiskUsage(int fallbackStoragePercent) {
 // Battery Telemetry & IOCTL Queries
 // ============================================================================
 
+inline bool IsProcessRunning(const wchar_t* processName) {
+    bool running = false;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W entry = {};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshot, &entry)) {
+            do {
+                if (_wcsicmp(entry.szExeFile, processName) == 0) {
+                    running = true;
+                    break;
+                }
+            } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+    }
+    return running;
+}
+
+inline bool GetGHelperPowerMode(std::wstring& outMode) {
+    static ULONGLONG s_lastCheck = 0;
+    static bool s_isGHelperRunning = false;
+    const ULONGLONG now = GetTickCount64();
+    if (now - s_lastCheck > 2000) {
+        s_isGHelperRunning = IsProcessRunning(L"GHelper.exe");
+        s_lastCheck = now;
+    }
+    if (!s_isGHelperRunning) {
+        return false;
+    }
+
+    wchar_t appData[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH) == 0) {
+        return false;
+    }
+
+    std::wstring configPath = std::wstring(appData) + L"\\GHelper\\config.json";
+    HANDLE hFile = CreateFileW(configPath.c_str(), GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    char buffer[4096] = {};
+    DWORD bytesRead = 0;
+    BOOL readSuccess = ReadFile(hFile, buffer, sizeof(buffer) - 1, &bytesRead, nullptr);
+    CloseHandle(hFile);
+
+    if (!readSuccess || bytesRead == 0) {
+        return false;
+    }
+    buffer[bytesRead] = '\0';
+
+    const char* key = "\"performance_mode\"";
+    const char* pos = strstr(buffer, key);
+    if (!pos) {
+        return false;
+    }
+
+    pos += strlen(key);
+    while (*pos == ' ' || *pos == '\t' || *pos == ':') {
+        pos++;
+    }
+
+    int modeVal = -1;
+    if (sscanf_s(pos, "%d", &modeVal) != 1) {
+        return false;
+    }
+
+    // Standard ASUS G-Helper modes: 0 = Balanced, 1 = Turbo, 2 = Silent
+    switch (modeVal) {
+        case 0:
+            outMode = L"Balanced";
+            return true;
+        case 1:
+            outMode = L"Turbo";
+            return true;
+        case 2:
+            outMode = L"Silent";
+            return true;
+        default:
+            return false;
+    }
+}
+
 inline void UpdateBatterySnapshot() {
     SYSTEM_POWER_STATUS status = {};
     if (!GetSystemPowerStatus(&status)) {
@@ -211,19 +298,22 @@ inline void UpdateBatterySnapshot() {
     int newSecondsToFull = (status.BatteryFullLifeTime != static_cast<DWORD>(-1) && status.BatteryFullLifeTime != 0xFFFFFFFF && status.BatteryFullLifeTime > 0)
         ? static_cast<int>(status.BatteryFullLifeTime) : -1;
 
-    // Active power scheme name
-    std::wstring schemeName = L"Balanced";
-    GUID* pActiveScheme = nullptr;
-    if (PowerGetActiveScheme(nullptr, &pActiveScheme) == ERROR_SUCCESS && pActiveScheme) {
-        UCHAR schemeBuf[512] = {};
-        DWORD schemeBufSize = sizeof(schemeBuf);
-        if (PowerReadFriendlyName(nullptr, pActiveScheme, nullptr, nullptr, schemeBuf, &schemeBufSize) == ERROR_SUCCESS && schemeBufSize > 0) {
-            const wchar_t* readName = reinterpret_cast<const wchar_t*>(schemeBuf);
-            if (readName && wcslen(readName) > 0) {
-                schemeName = readName;
+    // Active power scheme name (prioritize G-Helper profile, fallback to Windows scheme)
+    std::wstring schemeName;
+    if (!GetGHelperPowerMode(schemeName)) {
+        schemeName = L"Balanced";
+        GUID* pActiveScheme = nullptr;
+        if (PowerGetActiveScheme(nullptr, &pActiveScheme) == ERROR_SUCCESS && pActiveScheme) {
+            UCHAR schemeBuf[512] = {};
+            DWORD schemeBufSize = sizeof(schemeBuf);
+            if (PowerReadFriendlyName(nullptr, pActiveScheme, nullptr, nullptr, schemeBuf, &schemeBufSize) == ERROR_SUCCESS && schemeBufSize > 0) {
+                const wchar_t* readName = reinterpret_cast<const wchar_t*>(schemeBuf);
+                if (readName && wcslen(readName) > 0) {
+                    schemeName = readName;
+                }
             }
+            LocalFree(pActiveScheme);
         }
-        LocalFree(pActiveScheme);
     }
 
     // Hardware query via battery IOCTLs

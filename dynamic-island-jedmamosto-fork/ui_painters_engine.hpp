@@ -1298,7 +1298,26 @@ class Renderer {
             FillAccentBloom(rect, radius, bloom * settings.accentBloom);
         }
 
-        if (settings.contourBorderMode != ContourBorderMode::Borderless && settings.contourBorderEnabled) {
+        // Adaptive contrast outline for top notch on dark/black backgrounds when collapsed
+        bool adaptiveNotchDrawn = false;
+        if (settings.notchStyle) {
+            const bool isCollapsed = (kind == IslandKind::Idle) || (rect.bottom - rect.top < 45.0f * settings.sizeScale);
+            if (isCollapsed && material_.onDark) {
+                const float bgLum = static_cast<float>(RelativeLuminance(pillBgColor_));
+                // Adaptive luminance: darker background gives crisp bright stroke
+                const float strokeAlpha = Clamp(0.38f - bgLum * 0.22f, 0.20f, 0.45f) * settingsOpacity_;
+                ComPtr<ID2D1SolidColorBrush> contrastBrush;
+                target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, strokeAlpha), &contrastBrush);
+                if (contrastBrush) {
+                    D2D1_RECT_F borderRect = D2D1::RectF(rect.left + 0.6f, rect.top,
+                                                         rect.right - 0.6f, rect.bottom - 0.6f);
+                    DrawIslandShape(borderRect, radius, settings.w11Style, true, contrastBrush.Get(), 1.2f);
+                    adaptiveNotchDrawn = true;
+                }
+            }
+        }
+
+        if (!adaptiveNotchDrawn && settings.contourBorderMode != ContourBorderMode::Borderless && settings.contourBorderEnabled) {
             D2D1_COLOR_F borderColor = settings.contourBorderColor;
             float strokeWidth = settings.w11Style ? 1.0f : (settings.themePreset == ThemePreset::AppleDark ? 0.5f : 0.8f);
 

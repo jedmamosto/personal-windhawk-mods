@@ -157,22 +157,6 @@ inline void DrawBentoCard(
     }
 }
 
-// Draws a subtle horizontal 1px hairline divider inside cards
-inline void DrawHairlineDivider(
-    ID2D1RenderTarget* target,
-    float x0,
-    float x1,
-    float y,
-    float opacity = 1.0f)
-{
-    if (!target) return;
-    ComPtr<ID2D1SolidColorBrush> lineBrush;
-    if (SUCCEEDED(target->CreateSolidColorBrush(
-            BentoWithAlpha(tokens::kDividerHairline, tokens::kDividerHairline.a * opacity), &lineBrush)) && lineBrush) {
-        target->DrawLine(D2D1::Point2F(x0, y), D2D1::Point2F(x1, y), lineBrush.Get(), 0.75f);
-    }
-}
-
 // Draws a hardware-accelerated Direct2D lightning bolt path centered at point `c`
 inline void DrawLightningBolt(
     ID2D1RenderTarget* target,
@@ -183,7 +167,6 @@ inline void DrawLightningBolt(
 {
     if (!target || !brush) return;
 
-    // Resolve factory from target if needed
     ComPtr<ID2D1Factory> d2dFactory = factory;
     if (!d2dFactory) {
         target->GetFactory(&d2dFactory);
@@ -196,7 +179,6 @@ inline void DrawLightningBolt(
     ComPtr<ID2D1GeometrySink> sink;
     if (FAILED(bolt->Open(&sink)) || !sink) return;
 
-    // Vertically centered coordinates (offset center by -0.41f * s)
     const float cyAdj = c.y - 0.41f * s;
     sink->BeginFigure(D2D1::Point2F(c.x + 0.07f * s, cyAdj + 0.16f * s), D2D1_FIGURE_BEGIN_FILLED);
     sink->AddLine(D2D1::Point2F(c.x - 0.11f * s, cyAdj + 0.44f * s));
@@ -211,588 +193,113 @@ inline void DrawLightningBolt(
     target->FillGeometry(bolt.Get(), brush);
 }
 
-// Draws a rounded level/progress bar with track and active fill
-inline void DrawRoundedLevelBar(
-    ID2D1RenderTarget* target,
-    D2D1_RECT_F trackRect,
-    float barHeight,
-    float fraction,
-    D2D1_COLOR_F barColor,
-    float opacity = 1.0f)
-{
-    if (!target) return;
-    const float radius = barHeight * 0.5f;
-
-    // Track background
-    ComPtr<ID2D1SolidColorBrush> trackBrush;
-    if (SUCCEEDED(target->CreateSolidColorBrush(
-            BentoWithAlpha(tokens::kTrackBackground, tokens::kTrackBackground.a * opacity), &trackBrush)) && trackBrush) {
-        target->FillRoundedRectangle(D2D1::RoundedRect(trackRect, radius, radius), trackBrush.Get());
-    }
-
-    // Active fill
-    const float clampedFrac = BentoClamp(fraction, 0.0f, 1.0f);
-    if (clampedFrac > 0.01f) {
-        const float fillW = std::max(barHeight, (trackRect.right - trackRect.left) * clampedFrac);
-        const D2D1_RECT_F fillRect = D2D1::RectF(
-            trackRect.left, trackRect.top,
-            std::min(trackRect.right, trackRect.left + fillW), trackRect.bottom);
-
-        ComPtr<ID2D1SolidColorBrush> fillBrush;
-        if (SUCCEEDED(target->CreateSolidColorBrush(
-                BentoWithAlpha(barColor, barColor.a * opacity), &fillBrush)) && fillBrush) {
-            target->FillRoundedRectangle(D2D1::RoundedRect(fillRect, radius, radius), fillBrush.Get());
-        }
-    }
-}
-
 // ============================================================================
-// Bento Grid Tile Renderers
+// 2x3 Battery & Power Dashboard Grid (Mirroring Hardware Monitor)
 // ============================================================================
 
-// ----------------------------------------------------------------------------
-// TILE 1: Battery Hero (Top-Left, 163px × 64px)
-// Centered/leading battery percentage + lightning bolt + Apple System Green bar + wattage
-// ----------------------------------------------------------------------------
-inline void DrawHeroTile(
+enum class BatteryGlyphKind {
+    Battery = 0,
+    Peripheral,
+    PowerFlow,
+    Time,
+    PowerMode,
+    Health
+};
+
+struct BatteryGridCard {
+    BatteryGlyphKind glyphKind = BatteryGlyphKind::Battery;
+    BentoDeviceCategory accessoryCategory = BentoDeviceCategory::Generic;
+    std::wstring label;
+    std::wstring value;
+    float fraction = -1.0f; // negative means no load bar
+    D2D1_COLOR_F tint = tokens::kAppleGreen;
+};
+
+inline void DrawGlyphIcon(
     ID2D1RenderTarget* target,
     ID2D1Factory* factory,
-    IDWriteTextFormat* boldTextFormat,
-    IDWriteTextFormat* textFormat,
-    IDWriteTextFormat* smallTextFormat,
-    D2D1_RECT_F cardRect,
-    float scale,
-    const BentoBatteryData& data,
-    D2D1_COLOR_F cardFill,
-    float opacity = 1.0f)
-{
-    DrawBentoCard(target, cardRect, 10.0f * scale, cardFill, opacity);
-
-    const float padInner = 10.0f * scale;
-    const float innerX = cardRect.left + padInner;
-    const float innerW = (cardRect.right - cardRect.left) - padInner * 2.0f;
-
-    // Brushes
-    ComPtr<ID2D1SolidColorBrush> textWhite;
-    ComPtr<ID2D1SolidColorBrush> textMuted;
-    ComPtr<ID2D1SolidColorBrush> greenBrush;
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kTextPrimary, tokens::kTextPrimary.a * opacity), &textWhite);
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kTextSecondary, tokens::kTextSecondary.a * opacity), &textMuted);
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kAppleGreen, tokens::kAppleGreen.a * opacity), &greenBrush);
-
-    // Row 1: Battery Percentage + Lightning Bolt + Wattage / Status
-    const float topRowY = cardRect.top + 7.0f * scale;
-    const float topRowH = 19.0f * scale;
-
-    // Percentage text
-    wchar_t pctText[16] = {};
-    swprintf_s(pctText, L"%d%%", data.percent);
-
-    if (textFormat && textWhite) {
-        textFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        textFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        // Calculate text width approx or draw text in leading box
-        const D2D1_RECT_F pctRect = D2D1::RectF(innerX, topRowY, innerX + 46.0f * scale, topRowY + topRowH);
-        target->DrawTextW(pctText, static_cast<UINT32>(wcslen(pctText)), textFormat, pctRect,
-                           textWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-        // Approximate pct width: 2 digits + % ~ 34px, 3 digits ~ 42px
-        const float pctAdvance = (data.percent >= 100) ? 42.0f * scale : 34.0f * scale;
-
-        // Lightning bolt icon (when charging)
-        if (data.charging && greenBrush) {
-            const D2D1_POINT_2F boltCenter = D2D1::Point2F(innerX + pctAdvance + 8.0f * scale, topRowY + topRowH * 0.5f);
-            DrawLightningBolt(target, factory, boltCenter, 11.5f * scale, greenBrush.Get());
-        }
-    }
-
-    // Wattage / Power flow status (right-aligned in top row)
-    wchar_t wattageText[48] = {};
-    bool isFastCharge = false;
-    if (std::abs(data.powerRateWatts) > 0.05f) {
-        if (data.powerRateWatts > 0.0f) {
-            if (data.powerRateWatts >= 35.0f) {
-                swprintf_s(wattageText, L"+%.0fW Fast Chg", data.powerRateWatts);
-                isFastCharge = true;
-            } else {
-                swprintf_s(wattageText, L"+%.1fW Flow", data.powerRateWatts);
-            }
-        } else {
-            swprintf_s(wattageText, L"%.1fW Flow", data.powerRateWatts);
-        }
-    } else if (data.charging) {
-        wcscpy_s(wattageText, L"AC Power");
-    } else {
-        wcscpy_s(wattageText, L"Normal Flow");
-    }
-
-    if (smallTextFormat) {
-        smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-        smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        ID2D1SolidColorBrush* wattBrush = (isFastCharge && greenBrush) ? greenBrush.Get() : textMuted.Get();
-        const D2D1_RECT_F wattRect = D2D1::RectF(innerX + 50.0f * scale, topRowY, innerX + innerW, topRowY + topRowH);
-        target->DrawTextW(wattageText, static_cast<UINT32>(wcslen(wattageText)), smallTextFormat, wattRect,
-                           wattBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // Row 2: Apple Green Level Bar (6.0px rounded bar)
-    const float barY = cardRect.top + 28.5f * scale;
-    const float barH = 6.0f * scale;
-    const D2D1_RECT_F barRect = D2D1::RectF(innerX, barY, innerX + innerW, barY + barH);
-
-    // Color Resolution: STRICT Apple System Green (#34C759) when charging, NEVER cyan!
-    D2D1_COLOR_F barColor = tokens::kAppleGreen;
-    if (!data.charging) {
-        if (data.percent <= 10) {
-            barColor = tokens::kAppleRed;
-        } else if (data.percent <= 20) {
-            barColor = tokens::kAppleAmber;
-        }
-    }
-    DrawRoundedLevelBar(target, barRect, barH, data.percent / 100.0f, barColor, opacity);
-
-    // Row 3: Subtitle / State label (bottom row)
-    const float botRowY = cardRect.top + 39.5f * scale;
-    const float botRowH = 18.0f * scale;
-
-    const wchar_t* subLabel = data.charging
-        ? (data.percent >= 100 ? L"Fully Charged" : L"Charging")
-        : (data.percent <= 20 ? L"Low Battery" : L"On Battery");
-
-    if (smallTextFormat && textMuted) {
-        smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        const D2D1_RECT_F subRect = D2D1::RectF(innerX, botRowY, innerX + innerW * 0.55f, botRowY + botRowH);
-        target->DrawTextW(subLabel, static_cast<UINT32>(wcslen(subLabel)), smallTextFormat, subRect,
-                           (data.charging && greenBrush) ? greenBrush.Get() : textMuted.Get(),
-                           D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-        // Right side of bottom row: quick time summary if available
-        wchar_t quickTime[32] = {};
-        if (data.charging && data.secondsToFull > 0) {
-            const int h = data.secondsToFull / 3600;
-            const int m = (data.secondsToFull % 3600) / 60;
-            if (h > 0) swprintf_s(quickTime, L"%dh %dm to full", h, m);
-            else swprintf_s(quickTime, L"%dm to full", m);
-        } else if (!data.charging && data.secondsRemaining > 0) {
-            const int h = data.secondsRemaining / 3600;
-            const int m = (data.secondsRemaining % 3600) / 60;
-            if (h > 0) swprintf_s(quickTime, L"%dh %dm left", h, m);
-            else swprintf_s(quickTime, L"%dm left", m);
-        }
-
-        if (quickTime[0] != L'\0') {
-            smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-            const D2D1_RECT_F timeRect = D2D1::RectF(innerX + innerW * 0.45f, botRowY, innerX + innerW, botRowY + botRowH);
-            target->DrawTextW(quickTime, static_cast<UINT32>(wcslen(quickTime)), smallTextFormat, timeRect,
-                               textMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
-
-        smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-    }
-}
-
-// ----------------------------------------------------------------------------
-// TILE 2: Connected Peripherals (Top-Right, 163px × 64px)
-// Device Name + Category Icon + Level Bar + % OR Ambient "No Peripherals Connected"
-// ----------------------------------------------------------------------------
-inline void DrawPeripheralsTile(
-    ID2D1RenderTarget* target,
-    IDWriteTextFormat* boldTextFormat,
-    IDWriteTextFormat* textFormat,
-    IDWriteTextFormat* smallTextFormat,
     IDWriteTextFormat* iconFormat,
-    D2D1_RECT_F cardRect,
-    float scale,
-    const std::vector<BentoAccessory>& accessories,
-    D2D1_COLOR_F cardFill,
-    float opacity = 1.0f)
-{
-    DrawBentoCard(target, cardRect, 10.0f * scale, cardFill, opacity);
-
-    const float padInner = 10.0f * scale;
-    const float innerX = cardRect.left + padInner;
-    const float innerW = (cardRect.right - cardRect.left) - padInner * 2.0f;
-
-    // Surface brushes
-    ComPtr<ID2D1SolidColorBrush> textWhite;
-    ComPtr<ID2D1SolidColorBrush> textMuted;
-    ComPtr<ID2D1SolidColorBrush> textTertiary;
-    ComPtr<ID2D1SolidColorBrush> greenBrush;
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kTextPrimary, tokens::kTextPrimary.a * opacity), &textWhite);
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kTextSecondary, tokens::kTextSecondary.a * opacity), &textMuted);
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kTextTertiary, tokens::kTextTertiary.a * opacity), &textTertiary);
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kAppleGreen, tokens::kAppleGreen.a * opacity), &greenBrush);
-
-    // Filter connected accessories
-    std::vector<const BentoAccessory*> activeList;
-    for (const auto& acc : accessories) {
-        if (acc.connected && !acc.name.empty()) {
-            activeList.push_back(&acc);
-        }
-    }
-
-    if (activeList.empty()) {
-        // ====================================================================
-        // Ambient "No Peripherals Connected" Card (Clean Apple Dark Restraint)
-        // ====================================================================
-        const float cx = (cardRect.left + cardRect.right) * 0.5f;
-
-        // Centered Bluetooth glyph
-        if (iconFormat && textTertiary) {
-            iconFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            iconFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-            const wchar_t* btGlyph = L"\uE702"; // Segoe Bluetooth
-            const D2D1_RECT_F glyphRect = D2D1::RectF(
-                cx - 16.0f * scale, cardRect.top + 10.0f * scale,
-                cx + 16.0f * scale, cardRect.top + 30.0f * scale);
-
-            target->DrawTextW(btGlyph, static_cast<UINT32>(wcslen(btGlyph)), iconFormat, glyphRect,
-                               textTertiary.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
-            iconFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        }
-
-        // Sentence-cased ambient placeholder
-        if (smallTextFormat && textTertiary) {
-            smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-            const wchar_t* kEmptyMsg = L"No Peripherals Connected";
-            const D2D1_RECT_F msgRect = D2D1::RectF(
-                innerX, cardRect.top + 32.0f * scale,
-                innerX + innerW, cardRect.top + 52.0f * scale);
-
-            target->DrawTextW(kEmptyMsg, static_cast<UINT32>(wcslen(kEmptyMsg)), smallTextFormat, msgRect,
-                               textTertiary.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        }
-    } else {
-        // ====================================================================
-        // Active Peripheral Tile (Hero accessory display)
-        // ====================================================================
-        const BentoAccessory* primary = activeList[0];
-
-        // Row 1: Category Icon + Device Name + Battery %
-        const float topRowY = cardRect.top + 7.0f * scale;
-        const float topRowH = 19.0f * scale;
-        const float iconW = 16.0f * scale;
-
-        // Category Icon
-        if (iconFormat && textWhite) {
-            iconFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            iconFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-            const wchar_t* glyph = GetCategoryGlyph(primary->category);
-            const D2D1_RECT_F iconRect = D2D1::RectF(innerX, topRowY, innerX + iconW, topRowY + topRowH);
-            target->DrawTextW(glyph, static_cast<UINT32>(wcslen(glyph)), iconFormat, iconRect,
-                               textWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            iconFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        }
-
-        // Percentage text (right-aligned in top row)
-        float pctRightW = 0.0f;
-        if (primary->batteryPercent >= 0 && smallTextFormat && textWhite) {
-            wchar_t batBuf[16] = {};
-            swprintf_s(batBuf, L"%d%%", primary->batteryPercent);
-
-            smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-            smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-            pctRightW = 34.0f * scale;
-            const D2D1_RECT_F pctRect = D2D1::RectF(
-                innerX + innerW - pctRightW, topRowY, innerX + innerW, topRowY + topRowH);
-
-            D2D1_COLOR_F pctColor = (primary->batteryPercent <= 10) ? tokens::kAppleRed
-                : ((primary->batteryPercent <= 20) ? tokens::kAppleAmber : tokens::kAppleGreen);
-
-            ComPtr<ID2D1SolidColorBrush> pctBrush;
-            if (SUCCEEDED(target->CreateSolidColorBrush(
-                    BentoWithAlpha(pctColor, pctColor.a * opacity), &pctBrush)) && pctBrush) {
-                target->DrawTextW(batBuf, static_cast<UINT32>(wcslen(batBuf)), smallTextFormat, pctRect,
-                                   pctBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            }
-        }
-
-        // Device Name (clipped between icon and pct)
-        if (smallTextFormat && textWhite) {
-            smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-            const float nameLeft = innerX + iconW + 6.0f * scale;
-            const float nameRight = innerX + innerW - (pctRightW > 0 ? (pctRightW + 4.0f * scale) : 0.0f);
-            const D2D1_RECT_F nameRect = D2D1::RectF(nameLeft, topRowY, nameRight, topRowY + topRowH);
-
-            target->DrawTextW(primary->name.c_str(), static_cast<UINT32>(primary->name.size()),
-                               smallTextFormat, nameRect, textWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
-
-        // Row 2: 5.5px Rounded Level Bar
-        const float barY = cardRect.top + 29.0f * scale;
-        const float barH = 5.5f * scale;
-        const D2D1_RECT_F barRect = D2D1::RectF(innerX, barY, innerX + innerW, barY + barH);
-
-        if (primary->batteryPercent >= 0) {
-            D2D1_COLOR_F barColor = (primary->batteryPercent <= 10) ? tokens::kAppleRed
-                : ((primary->batteryPercent <= 20) ? tokens::kAppleAmber : tokens::kAppleGreen);
-
-            DrawRoundedLevelBar(target, barRect, barH, primary->batteryPercent / 100.0f, barColor, opacity);
-        } else {
-            // Indeterminate / connected without battery track
-            DrawRoundedLevelBar(target, barRect, barH, 1.0f, tokens::kCardHairline, opacity * 0.6f);
-        }
-
-        // Row 3: Status / Secondary Peripheral indicator
-        const float botRowY = cardRect.top + 39.5f * scale;
-        const float botRowH = 18.0f * scale;
-
-        if (smallTextFormat && textMuted) {
-            smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-            const wchar_t* statusStr = (primary->batteryPercent >= 0) ? L"Connected" : L"Bluetooth Active";
-            const D2D1_RECT_F statRect = D2D1::RectF(innerX, botRowY, innerX + innerW * 0.60f, botRowY + botRowH);
-            target->DrawTextW(statusStr, static_cast<UINT32>(wcslen(statusStr)), smallTextFormat, statRect,
-                               textMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-            // If there's an additional connected device, mention it cleanly
-            if (activeList.size() > 1) {
-                wchar_t extraBuf[32] = {};
-                swprintf_s(extraBuf, L"+%zu device", activeList.size() - 1);
-
-                smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-                const D2D1_RECT_F extraRect = D2D1::RectF(innerX + innerW * 0.50f, botRowY, innerX + innerW, botRowY + botRowH);
-                target->DrawTextW(extraBuf, static_cast<UINT32>(wcslen(extraBuf)), smallTextFormat, extraRect,
-                                   textMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            }
-
-            smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        }
-    }
-}
-
-// ----------------------------------------------------------------------------
-// TILE 3: Time Remaining & Power Mode (Bottom-Left, 163px × 64px)
-// Top: TIME REMAINING over "1h 24m until full" | Bottom: POWER MODE over "Balanced Mode"
-// ----------------------------------------------------------------------------
-inline void DrawTimePowerTile(
-    ID2D1RenderTarget* target,
-    IDWriteTextFormat* boldTextFormat,
-    IDWriteTextFormat* textFormat,
-    IDWriteTextFormat* smallTextFormat,
-    D2D1_RECT_F cardRect,
-    float scale,
+    const BatteryGridCard& card,
     const BentoBatteryData& data,
-    D2D1_COLOR_F cardFill,
-    float opacity = 1.0f)
+    D2D1_POINT_2F c,
+    float s,
+    ID2D1Brush* brush,
+    float scale)
 {
-    DrawBentoCard(target, cardRect, 10.0f * scale, cardFill, opacity);
+    if (!target || !brush) return;
 
-    const float padInner = 10.0f * scale;
-    const float innerX = cardRect.left + padInner;
-    const float innerW = (cardRect.right - cardRect.left) - padInner * 2.0f;
-
-    // Brushes
-    ComPtr<ID2D1SolidColorBrush> textWhite;
-    ComPtr<ID2D1SolidColorBrush> textMuted;
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kTextPrimary, tokens::kTextPrimary.a * opacity), &textWhite);
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kTextSecondary, tokens::kTextSecondary.a * opacity), &textMuted);
-
-    // Upper Half: Time Remaining
-    const float sec1Top = cardRect.top + 6.0f * scale;
-    const wchar_t* timeLabel = data.charging ? L"TIME UNTIL FULL" : L"TIME REMAINING";
-
-    if (smallTextFormat && textMuted) {
-        smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        const D2D1_RECT_F lblRect = D2D1::RectF(innerX, sec1Top, innerX + innerW, sec1Top + 11.5f * scale);
-        target->DrawTextW(timeLabel, static_cast<UINT32>(wcslen(timeLabel)), smallTextFormat, lblRect,
-                           textMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // Time Value string
-    wchar_t timeVal[48] = {};
-    if (data.charging) {
-        if (data.percent >= 100) {
-            wcscpy_s(timeVal, L"Fully Charged");
-        } else if (data.secondsToFull > 0) {
-            const int h = data.secondsToFull / 3600;
-            const int m = (data.secondsToFull % 3600) / 60;
-            if (h > 0) swprintf_s(timeVal, L"%dh %dm until full", h, m);
-            else swprintf_s(timeVal, L"%dm until full", m);
-        } else {
-            wcscpy_s(timeVal, L"Charging");
+    switch (card.glyphKind) {
+        case BatteryGlyphKind::Battery: {
+            if (data.charging) {
+                DrawLightningBolt(target, factory, c, 13.0f * scale, brush);
+            } else {
+                // Vector battery silhouette
+                const D2D1_RECT_F body = D2D1::RectF(c.x - 0.38f * s, c.y - 0.22f * s, c.x + 0.26f * s, c.y + 0.22f * s);
+                target->DrawRoundedRectangle(D2D1::RoundedRect(body, 1.5f * scale, 1.5f * scale), brush, 1.1f);
+                target->FillRectangle(D2D1::RectF(c.x + 0.26f * s, c.y - 0.08f * s, c.x + 0.35f * s, c.y + 0.08f * s), brush);
+                if (card.fraction > 0.05f) {
+                    const float fillW = (body.right - 1.5f * scale) - (body.left + 1.5f * scale);
+                    const D2D1_RECT_F inner = D2D1::RectF(
+                        body.left + 1.5f * scale, body.top + 1.5f * scale,
+                        body.left + 1.5f * scale + fillW * BentoClamp(card.fraction, 0.0f, 1.0f), body.bottom - 1.5f * scale);
+                    target->FillRectangle(inner, brush);
+                }
+            }
+            break;
         }
-    } else {
-        if (data.secondsRemaining > 0) {
-            const int h = data.secondsRemaining / 3600;
-            const int m = (data.secondsRemaining % 3600) / 60;
-            if (h > 0) swprintf_s(timeVal, L"%dh %dm remaining", h, m);
-            else swprintf_s(timeVal, L"%dm remaining", m);
-        } else if (data.healthPercent < 0 && data.cycleCount < 0 && data.percent == 100) {
-            wcscpy_s(timeVal, L"AC Connected");
-        } else {
-            wcscpy_s(timeVal, L"Discharging");
+        case BatteryGlyphKind::Peripheral: {
+            if (iconFormat) {
+                iconFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                iconFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                const wchar_t* glyph = GetCategoryGlyph(card.accessoryCategory);
+                const D2D1_RECT_F r = D2D1::RectF(c.x - s * 0.5f, c.y - s * 0.5f, c.x + s * 0.5f, c.y + s * 0.5f);
+                target->DrawTextW(glyph, static_cast<UINT32>(wcslen(glyph)), iconFormat, r, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                iconFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            }
+            break;
         }
-    }
+        case BatteryGlyphKind::PowerFlow: {
+            DrawLightningBolt(target, factory, c, 13.0f * scale, brush);
+            break;
+        }
+        case BatteryGlyphKind::Time: {
+            // Clock face with hands
+            target->DrawEllipse(D2D1::Ellipse(c, 0.38f * s, 0.38f * s), brush, 1.1f);
+            target->FillEllipse(D2D1::Ellipse(c, 0.08f * s, 0.08f * s), brush);
+            target->DrawLine(c, D2D1::Point2F(c.x, c.y - 0.22f * s), brush, 1.1f);
+            target->DrawLine(c, D2D1::Point2F(c.x + 0.20f * s, c.y), brush, 1.1f);
+            break;
+        }
+        case BatteryGlyphKind::PowerMode: {
+            // Performance dial / speed gauge
+            target->DrawEllipse(D2D1::Ellipse(c, 0.38f * s, 0.38f * s), brush, 1.1f);
+            target->FillEllipse(D2D1::Ellipse(c, 0.08f * s, 0.08f * s), brush);
+            target->DrawLine(c, D2D1::Point2F(c.x + 0.22f * s, c.y - 0.20f * s), brush, 1.2f);
+            break;
+        }
+        case BatteryGlyphKind::Health: {
+            // Shield outline
+            const float hw = 0.32f * s;
+            const float topY = c.y - 0.32f * s;
+            const float midY = c.y + 0.08f * s;
+            const float botY = c.y + 0.38f * s;
+            target->DrawLine(D2D1::Point2F(c.x - hw, topY), D2D1::Point2F(c.x + hw, topY), brush, 1.1f);
+            target->DrawLine(D2D1::Point2F(c.x + hw, topY), D2D1::Point2F(c.x + hw, midY), brush, 1.1f);
+            target->DrawLine(D2D1::Point2F(c.x + hw, midY), D2D1::Point2F(c.x, botY), brush, 1.1f);
+            target->DrawLine(D2D1::Point2F(c.x, botY), D2D1::Point2F(c.x - hw, midY), brush, 1.1f);
+            target->DrawLine(D2D1::Point2F(c.x - hw, midY), D2D1::Point2F(c.x - hw, topY), brush, 1.1f);
 
-    if (textFormat && textWhite) {
-        textFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        textFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        const D2D1_RECT_F valRect = D2D1::RectF(innerX, sec1Top + 11.5f * scale, innerX + innerW, sec1Top + 26.5f * scale);
-        target->DrawTextW(timeVal, static_cast<UINT32>(wcslen(timeVal)), textFormat, valRect,
-                           textWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // Hairline separator between sub-sections
-    DrawHairlineDivider(target, innerX, innerX + innerW, cardRect.top + 34.0f * scale, opacity);
-
-    // Lower Half: Power Scheme / Mode
-    const float sec2Top = cardRect.top + 36.5f * scale;
-
-    if (smallTextFormat && textMuted) {
-        smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        const wchar_t* modeLabel = L"POWER MODE";
-        const D2D1_RECT_F lblRect = D2D1::RectF(innerX, sec2Top, innerX + innerW, sec2Top + 11.5f * scale);
-        target->DrawTextW(modeLabel, static_cast<UINT32>(wcslen(modeLabel)), smallTextFormat, lblRect,
-                           textMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // Power scheme value
-    wchar_t modeVal[48] = {};
-    const wchar_t* rawScheme = data.powerSchemeName.empty() ? L"Balanced" : data.powerSchemeName.c_str();
-    if (wcsstr(rawScheme, L"Mode") != nullptr || wcsstr(rawScheme, L"mode") != nullptr) {
-        swprintf_s(modeVal, L"%s", rawScheme);
-    } else {
-        swprintf_s(modeVal, L"%s Mode", rawScheme);
-    }
-
-    if (textFormat && textWhite) {
-        textFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        textFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        const D2D1_RECT_F valRect = D2D1::RectF(innerX, sec2Top + 11.5f * scale, innerX + innerW, sec2Top + 26.5f * scale);
-        target->DrawTextW(modeVal, static_cast<UINT32>(wcslen(modeVal)), textFormat, valRect,
-                           textWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            // Small checkmark inside shield
+            target->DrawLine(D2D1::Point2F(c.x - 0.14f * s, c.y - 0.02f * s), D2D1::Point2F(c.x - 0.03f * s, c.y + 0.10f * s), brush, 1.1f);
+            target->DrawLine(D2D1::Point2F(c.x - 0.03f * s, c.y + 0.10f * s), D2D1::Point2F(c.x + 0.16f * s, c.y - 0.12f * s), brush, 1.1f);
+            break;
+        }
     }
 }
 
 // ----------------------------------------------------------------------------
-// TILE 4: Battery Health & Cycle Count (Bottom-Right, 163px × 64px)
-// Top: BATTERY HEALTH over "92% Capacity" | Bottom: CYCLE COUNT over "142 Cycles"
+// Primary Bento Grid Orchestration Function (2x3 Grid)
 // ----------------------------------------------------------------------------
-inline void DrawHealthCyclesTile(
-    ID2D1RenderTarget* target,
-    IDWriteTextFormat* boldTextFormat,
-    IDWriteTextFormat* textFormat,
-    IDWriteTextFormat* smallTextFormat,
-    D2D1_RECT_F cardRect,
-    float scale,
-    const BentoBatteryData& data,
-    D2D1_COLOR_F cardFill,
-    float opacity = 1.0f)
-{
-    DrawBentoCard(target, cardRect, 10.0f * scale, cardFill, opacity);
-
-    const float padInner = 10.0f * scale;
-    const float innerX = cardRect.left + padInner;
-    const float innerW = (cardRect.right - cardRect.left) - padInner * 2.0f;
-
-    // Brushes
-    ComPtr<ID2D1SolidColorBrush> textWhite;
-    ComPtr<ID2D1SolidColorBrush> textMuted;
-    ComPtr<ID2D1SolidColorBrush> greenBrush;
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kTextPrimary, tokens::kTextPrimary.a * opacity), &textWhite);
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kTextSecondary, tokens::kTextSecondary.a * opacity), &textMuted);
-    target->CreateSolidColorBrush(BentoWithAlpha(tokens::kAppleGreen, tokens::kAppleGreen.a * opacity), &greenBrush);
-
-    // Upper Half: Battery Health
-    const float sec1Top = cardRect.top + 6.0f * scale;
-
-    if (smallTextFormat && textMuted) {
-        smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        const wchar_t* healthLabel = L"BATTERY HEALTH";
-        const D2D1_RECT_F lblRect = D2D1::RectF(innerX, sec1Top, innerX + innerW, sec1Top + 11.5f * scale);
-        target->DrawTextW(healthLabel, static_cast<UINT32>(wcslen(healthLabel)), smallTextFormat, lblRect,
-                           textMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // Health capacity string
-    wchar_t healthVal[48] = {};
-    bool isHealthy = false;
-    if (data.healthPercent > 0) {
-        swprintf_s(healthVal, L"%d%% Capacity", data.healthPercent);
-        isHealthy = (data.healthPercent >= 80);
-    } else if (data.healthPercent < 0 && data.percent == 100) {
-        wcscpy_s(healthVal, L"Desktop Power");
-    } else {
-        wcscpy_s(healthVal, L"Normal (AC)");
-    }
-
-    if (textFormat && textWhite) {
-        textFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        textFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        const D2D1_RECT_F valRect = D2D1::RectF(innerX, sec1Top + 11.5f * scale, innerX + innerW, sec1Top + 26.5f * scale);
-        target->DrawTextW(healthVal, static_cast<UINT32>(wcslen(healthVal)), textFormat, valRect,
-                           textWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-        // Apple Green indicator dot for healthy battery condition
-        if (isHealthy && greenBrush) {
-            const float dotX = innerX + innerW - 6.0f * scale;
-            const float dotY = sec1Top + 19.0f * scale;
-            target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dotX, dotY), 3.0f * scale, 3.0f * scale), greenBrush.Get());
-        }
-    }
-
-    // Hairline separator between sub-sections
-    DrawHairlineDivider(target, innerX, innerX + innerW, cardRect.top + 34.0f * scale, opacity);
-
-    // Lower Half: Cycle Count
-    const float sec2Top = cardRect.top + 36.5f * scale;
-
-    if (smallTextFormat && textMuted) {
-        smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        const wchar_t* cycleLabel = L"CYCLE COUNT";
-        const D2D1_RECT_F lblRect = D2D1::RectF(innerX, sec2Top, innerX + innerW, sec2Top + 11.5f * scale);
-        target->DrawTextW(cycleLabel, static_cast<UINT32>(wcslen(cycleLabel)), smallTextFormat, lblRect,
-                           textMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-
-    // Cycle count string
-    wchar_t cycleVal[48] = {};
-    if (data.cycleCount > 0) {
-        swprintf_s(cycleVal, L"%d Cycles", data.cycleCount);
-    } else if (data.cycleCount < 0 && data.percent == 100) {
-        wcscpy_s(cycleVal, L"AC Direct (0c)");
-    } else {
-        wcscpy_s(cycleVal, L"< 50 Cycles");
-    }
-
-    if (textFormat && textWhite) {
-        textFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        textFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        const D2D1_RECT_F valRect = D2D1::RectF(innerX, sec2Top + 11.5f * scale, innerX + innerW, sec2Top + 26.5f * scale);
-        target->DrawTextW(cycleVal, static_cast<UINT32>(wcslen(cycleVal)), textFormat, valRect,
-                           textWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    }
-}
-
-// ============================================================================
-// Primary Bento Grid Orchestration Function
-// ============================================================================
 
 inline void DrawBatteryBentoGrid(
     ID2D1RenderTarget* target,
@@ -809,14 +316,10 @@ inline void DrawBatteryBentoGrid(
 {
     if (!target) return;
 
-    // Outer margins & layout geometry
-    const float padX = 22.0f * scale;
-    const float colW = 163.0f * scale;
-    const float colGap = 10.0f * scale;
-    const float cardH = 64.0f * scale;
-    const float rowGap = 8.0f * scale;
+    // Header layout (Mirroring Hardware Monitor)
+    const float padX = 24.0f * scale;
 
-    // Header Title: Left-aligned "Battery & Power"
+    // Left-aligned header title
     if (boldTextFormat) {
         ComPtr<ID2D1SolidColorBrush> titleBrush;
         if (SUCCEEDED(target->CreateSolidColorBrush(
@@ -826,46 +329,270 @@ inline void DrawBatteryBentoGrid(
 
             const wchar_t* kHeaderTitle = L"Battery & Power";
             const D2D1_RECT_F titleRect = D2D1::RectF(
-                rect.left + padX, rect.top + 13.0f * scale,
-                rect.right - padX, rect.top + 29.0f * scale);
+                rect.left + padX, rect.top + 16.0f * scale,
+                rect.right - padX, rect.top + 32.0f * scale);
 
             target->DrawTextW(kHeaderTitle, static_cast<UINT32>(wcslen(kHeaderTitle)), boldTextFormat,
-                               titleRect, titleBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                               titleRect, titleBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             boldTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         }
     }
 
-    // Compute Exact 4-Tile Bento Grid Coordinates
-    const float x0 = rect.left + padX;
-    const float x1 = x0 + colW;
-    const float x2 = x1 + colGap;
-    const float x3 = x2 + colW;
+    // ------------------------------------------------------------------------
+    // Prepare the 6 Cards for 2x3 Grid
+    // ------------------------------------------------------------------------
+    BatteryGridCard cards[6];
 
-    const float y0 = rect.top + 33.0f * scale;
-    const float y1 = y0 + cardH;
-    const float y2 = y1 + rowGap;
-    const float y3 = y2 + cardH;
+    // --- CARD 0: Battery Level (Top-Left) ---
+    cards[0].glyphKind = BatteryGlyphKind::Battery;
+    cards[0].label = data.charging
+        ? (data.percent >= 100 ? L"FULLY CHARGED" : L"CHARGING")
+        : (data.percent <= 20 ? L"LOW BATTERY" : L"BATTERY");
+    wchar_t batVal[32] = {};
+    if (data.charging && data.percent >= 100) {
+        swprintf_s(batVal, L"100%% Full");
+    } else if (data.charging) {
+        swprintf_s(batVal, L"%d%% (AC)", data.percent);
+    } else {
+        swprintf_s(batVal, L"%d%%", data.percent);
+    }
+    cards[0].value = batVal;
+    cards[0].fraction = BentoClamp(data.percent / 100.0f, 0.0f, 1.0f);
+    cards[0].tint = data.charging ? tokens::kAppleGreen
+        : ((data.percent <= 10) ? tokens::kAppleRed
+        : ((data.percent <= 20) ? tokens::kAppleAmber : tokens::kAppleGreen));
 
-    const D2D1_RECT_F tile1Rect = D2D1::RectF(x0, y0, x1, y1); // Top-Left: Hero
-    const D2D1_RECT_F tile2Rect = D2D1::RectF(x2, y0, x3, y1); // Top-Right: Peripherals
-    const D2D1_RECT_F tile3Rect = D2D1::RectF(x0, y2, x1, y3); // Bottom-Left: Time & Power
-    const D2D1_RECT_F tile4Rect = D2D1::RectF(x2, y2, x3, y3); // Bottom-Right: Health & Cycles
+    // --- CARD 1: Connected Peripherals (Top-Right) ---
+    cards[1].glyphKind = BatteryGlyphKind::Peripheral;
+    cards[1].accessoryCategory = BentoDeviceCategory::Generic;
+    const BentoAccessory* primaryAccessory = nullptr;
+    size_t activeAccCount = 0;
+    for (const auto& acc : data.accessories) {
+        if (acc.connected && !acc.name.empty()) {
+            if (!primaryAccessory) primaryAccessory = &acc;
+            activeAccCount++;
+        }
+    }
 
-    // Tile 1: Battery Hero (Top-Left)
-    DrawHeroTile(target, factory, boldTextFormat, textFormat, smallTextFormat,
-                 tile1Rect, scale, data, cardFill, opacity);
+    if (primaryAccessory) {
+        cards[1].accessoryCategory = primaryAccessory->category;
+        if (activeAccCount > 1) {
+            wchar_t accLbl[48] = {};
+            swprintf_s(accLbl, L"PERIPHERAL (+%zu)", activeAccCount - 1);
+            cards[1].label = accLbl;
+        } else {
+            cards[1].label = L"PERIPHERAL";
+        }
 
-    // Tile 2: Connected Peripherals (Top-Right)
-    DrawPeripheralsTile(target, boldTextFormat, textFormat, smallTextFormat, iconFormat,
-                        tile2Rect, scale, data.accessories, cardFill, opacity);
+        wchar_t accVal[64] = {};
+        if (primaryAccessory->batteryPercent >= 0) {
+            swprintf_s(accVal, L"%s (%d%%)", primaryAccessory->name.c_str(), primaryAccessory->batteryPercent);
+            cards[1].fraction = BentoClamp(primaryAccessory->batteryPercent / 100.0f, 0.0f, 1.0f);
+            cards[1].tint = (primaryAccessory->batteryPercent <= 10) ? tokens::kAppleRed
+                : ((primaryAccessory->batteryPercent <= 20) ? tokens::kAppleAmber : tokens::kAppleGreen);
+        } else {
+            swprintf_s(accVal, L"%s", primaryAccessory->name.c_str());
+            cards[1].fraction = -1.0f;
+            cards[1].tint = tokens::kAppleGreen;
+        }
+        cards[1].value = accVal;
+    } else {
+        cards[1].label = L"PERIPHERAL";
+        cards[1].value = L"No Devices";
+        cards[1].fraction = -1.0f;
+        cards[1].tint = tokens::kTextTertiary;
+    }
 
-    // Tile 3: Time Remaining & Power Mode (Bottom-Left)
-    DrawTimePowerTile(target, boldTextFormat, textFormat, smallTextFormat,
-                      tile3Rect, scale, data, cardFill, opacity);
+    // --- CARD 2: Power Flow / Wattage Rate (Mid-Left) ---
+    cards[2].glyphKind = BatteryGlyphKind::PowerFlow;
+    cards[2].label = L"POWER FLOW";
+    wchar_t flowVal[48] = {};
+    if (std::abs(data.powerRateWatts) > 0.05f) {
+        if (data.powerRateWatts > 0.0f) {
+            if (data.powerRateWatts >= 35.0f) {
+                swprintf_s(flowVal, L"+%.0fW Fast Chg", data.powerRateWatts);
+            } else {
+                swprintf_s(flowVal, L"+%.1fW Flow", data.powerRateWatts);
+            }
+        } else {
+            swprintf_s(flowVal, L"%.1fW Flow", data.powerRateWatts);
+        }
+    } else if (data.charging) {
+        wcscpy_s(flowVal, L"AC Power");
+    } else {
+        wcscpy_s(flowVal, L"Normal Flow");
+    }
+    cards[2].value = flowVal;
+    cards[2].fraction = -1.0f; // Wattage flow has no natural ceiling
+    cards[2].tint = (data.powerRateWatts >= 35.0f) ? tokens::kAppleGreen
+        : ((data.powerRateWatts > 0.0f) ? tokens::kAppleGreen : tokens::kAppleAmber);
 
-    // Tile 4: Battery Health & Cycle Count (Bottom-Right)
-    DrawHealthCyclesTile(target, boldTextFormat, textFormat, smallTextFormat,
-                         tile4Rect, scale, data, cardFill, opacity);
+    // --- CARD 3: Time Remaining / Time to Full (Mid-Right) ---
+    cards[3].glyphKind = BatteryGlyphKind::Time;
+    cards[3].label = data.charging ? L"TIME UNTIL FULL" : L"TIME REMAINING";
+    wchar_t timeVal[48] = {};
+    if (data.charging) {
+        if (data.percent >= 100) {
+            wcscpy_s(timeVal, L"Fully Charged");
+        } else if (data.secondsToFull > 0) {
+            const int h = data.secondsToFull / 3600;
+            const int m = (data.secondsToFull % 3600) / 60;
+            if (h > 0) swprintf_s(timeVal, L"%dh %dm to full", h, m);
+            else swprintf_s(timeVal, L"%dm to full", m);
+        } else {
+            wcscpy_s(timeVal, L"Calculating...");
+        }
+    } else {
+        if (data.secondsRemaining > 0) {
+            const int h = data.secondsRemaining / 3600;
+            const int m = (data.secondsRemaining % 3600) / 60;
+            if (h > 0) swprintf_s(timeVal, L"%dh %dm left", h, m);
+            else swprintf_s(timeVal, L"%dm left", m);
+        } else if (data.healthPercent < 0 && data.percent == 100) {
+            wcscpy_s(timeVal, L"AC Connected");
+        } else {
+            wcscpy_s(timeVal, L"On Battery");
+        }
+    }
+    cards[3].value = timeVal;
+    cards[3].fraction = -1.0f;
+    cards[3].tint = tokens::kAppleGreen;
+
+    // --- CARD 4: Power Mode (Bot-Left) ---
+    cards[4].glyphKind = BatteryGlyphKind::PowerMode;
+    cards[4].label = L"POWER MODE";
+    wchar_t modeVal[48] = {};
+    const wchar_t* rawScheme = data.powerSchemeName.empty() ? L"Balanced" : data.powerSchemeName.c_str();
+    if (wcsstr(rawScheme, L"Mode") != nullptr || wcsstr(rawScheme, L"mode") != nullptr) {
+        swprintf_s(modeVal, L"%s", rawScheme);
+    } else {
+        swprintf_s(modeVal, L"%s Mode", rawScheme);
+    }
+    cards[4].value = modeVal;
+
+    // Mode-specific load bar & tint (Silent = 0.33, Balanced = 0.66, Turbo = 1.0)
+    if (wcsstr(modeVal, L"Turbo") || wcsstr(modeVal, L"High")) {
+        cards[4].fraction = 1.0f;
+        cards[4].tint = tokens::kAppleAmber;
+    } else if (wcsstr(modeVal, L"Silent")) {
+        cards[4].fraction = 0.33f;
+        cards[4].tint = D2D1::ColorF(76.0f / 255.0f, 201.0f / 255.0f, 240.0f / 255.0f, 1.0f);
+    } else {
+        cards[4].fraction = 0.66f;
+        cards[4].tint = tokens::kAppleGreen;
+    }
+
+    // --- CARD 5: Battery Health (Bot-Right) [ZERO CYCLE COUNT] ---
+    cards[5].glyphKind = BatteryGlyphKind::Health;
+    cards[5].label = L"BATTERY HEALTH";
+    wchar_t healthVal[48] = {};
+    if (data.healthPercent > 0) {
+        swprintf_s(healthVal, L"%d%% Capacity", data.healthPercent);
+        cards[5].fraction = BentoClamp(data.healthPercent / 100.0f, 0.0f, 1.0f);
+        cards[5].tint = (data.healthPercent >= 80) ? tokens::kAppleGreen
+            : ((data.healthPercent >= 60) ? tokens::kAppleAmber : tokens::kAppleRed);
+    } else if (data.healthPercent < 0 && data.percent == 100) {
+        wcscpy_s(healthVal, L"Desktop Power");
+        cards[5].fraction = 1.0f;
+        cards[5].tint = tokens::kAppleGreen;
+    } else {
+        wcscpy_s(healthVal, L"Normal (AC)");
+        cards[5].fraction = -1.0f;
+        cards[5].tint = tokens::kAppleGreen;
+    }
+    cards[5].value = healthVal;
+
+    // ------------------------------------------------------------------------
+    // Render 2x3 Grid of Cards (Exact Hardware Monitor Geometry)
+    // ------------------------------------------------------------------------
+    const float colGap = 9.0f * scale;
+    const float colW = (rect.right - rect.left - padX * 2.0f - colGap) * 0.5f;
+    const float rowH = 38.0f * scale;
+    const float rowGap = 6.0f * scale;
+    const float gridTop = rect.top + 38.0f * scale;
+
+    for (int i = 0; i < 6; ++i) {
+        const BatteryGridCard& m = cards[i];
+        const int col = i % 2;
+        const int row = i / 2;
+
+        const float cardLeft = rect.left + padX + static_cast<float>(col) * (colW + colGap);
+        const float cardTop = gridTop + static_cast<float>(row) * (rowH + rowGap);
+        const D2D1_RECT_F card = D2D1::RectF(cardLeft, cardTop, cardLeft + colW, cardTop + rowH);
+
+        DrawBentoCard(target, card, 9.0f * scale, cardFill, opacity);
+
+        const bool hasBar = (m.fraction >= 0.0f);
+
+        // Glyph (15px, centered at cardLeft + 16px, cardTop + 15px)
+        ComPtr<ID2D1SolidColorBrush> glyphBrush;
+        if (SUCCEEDED(target->CreateSolidColorBrush(
+                BentoWithAlpha(m.tint, 0.88f * opacity), &glyphBrush)) && glyphBrush) {
+            DrawGlyphIcon(target, factory, iconFormat, m, data,
+                          D2D1::Point2F(card.left + 16.0f * scale, card.top + 15.0f * scale),
+                          15.0f * scale, glyphBrush.Get(), scale);
+        }
+
+        const float textLeft = card.left + 30.0f * scale;
+        const float textRight = card.right - 9.0f * scale;
+
+        // Label above value
+        if (smallTextFormat) {
+            smallTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+            ComPtr<ID2D1SolidColorBrush> mutedBrush;
+            if (SUCCEEDED(target->CreateSolidColorBrush(
+                    BentoWithAlpha(tokens::kTextSecondary, 0.60f * opacity), &mutedBrush)) && mutedBrush) {
+                const D2D1_RECT_F lblRect = D2D1::RectF(
+                    textLeft, card.top + 2.0f * scale, textRight, card.top + 15.0f * scale);
+                target->DrawTextW(m.label.c_str(), static_cast<UINT32>(m.label.size()), smallTextFormat,
+                                   lblRect, mutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+            smallTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
+
+        // Value text
+        if (textFormat) {
+            textFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            textFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+            ComPtr<ID2D1SolidColorBrush> textBrush;
+            if (SUCCEEDED(target->CreateSolidColorBrush(
+                    BentoWithAlpha(tokens::kTextPrimary, 0.95f * opacity), &textBrush)) && textBrush) {
+                const float valueBottom = hasBar ? (card.top + 30.0f * scale) : (card.bottom - 4.0f * scale);
+                const D2D1_RECT_F valRect = D2D1::RectF(
+                    textLeft, card.top + 15.0f * scale, textRight, valueBottom);
+                target->DrawTextW(m.value.c_str(), static_cast<UINT32>(m.value.size()), textFormat,
+                                   valRect, textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+            textFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
+
+        // Bottom Load Bar
+        if (hasBar) {
+            const D2D1_RECT_F track = D2D1::RectF(
+                textLeft, card.bottom - 6.0f * scale, textRight, card.bottom - 3.5f * scale);
+            ComPtr<ID2D1SolidColorBrush> trackBrush;
+            if (SUCCEEDED(target->CreateSolidColorBrush(
+                    BentoWithAlpha(tokens::kTrackBackground, 0.12f * opacity), &trackBrush)) && trackBrush) {
+                target->FillRoundedRectangle(D2D1::RoundedRect(track, 1.25f * scale, 1.25f * scale), trackBrush.Get());
+            }
+
+            const float span = (track.right - track.left) * m.fraction;
+            if (span > 0.5f) {
+                ComPtr<ID2D1SolidColorBrush> fillBrush;
+                if (SUCCEEDED(target->CreateSolidColorBrush(
+                        BentoWithAlpha(m.tint, 0.95f * opacity), &fillBrush)) && fillBrush) {
+                    target->FillRoundedRectangle(
+                        D2D1::RoundedRect(
+                            D2D1::RectF(track.left, track.top, track.left + span, track.bottom),
+                            1.25f * scale, 1.25f * scale),
+                        fillBrush.Get());
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -955,4 +682,3 @@ inline void DrawBatteryBentoGridFromState(
 namespace battery = battery_bento;
 
 #endif // BATTERY_DASHBOARD_HPP
-

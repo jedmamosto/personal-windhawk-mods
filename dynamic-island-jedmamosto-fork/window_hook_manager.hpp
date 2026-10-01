@@ -3190,6 +3190,11 @@ inline DWORD WINAPI RenderThreadProc(void*) {
                 lastInteractionTime = NowSeconds();
                 continue;
             }
+            if (message.message == WM_APP_LAYOUT_CHANGED) {
+                lastInteractionTime = NowSeconds();
+                g_layoutDirty = true;
+                g_autoHiddenParked = false;
+            }
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
@@ -3618,7 +3623,7 @@ inline DWORD WINAPI RenderThreadProc(void*) {
         if (agyActive && !isFullscreen && !g_manuallyHidden.load()) {
             if (satExpanded) {
                 satTargetWidth = 380.0f * g_settings.sizeScale;
-                satTargetHeight = 180.0f * g_settings.sizeScale;
+                satTargetHeight = g_agyTelemetry.GetExpandedHeight(g_settings.sizeScale);
             } else {
                 satTargetWidth = 46.0f * g_settings.sizeScale;
                 satTargetHeight = primary.height > 1.0f ? primary.height : (36.0f * g_settings.sizeScale);

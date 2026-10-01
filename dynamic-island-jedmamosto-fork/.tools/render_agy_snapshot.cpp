@@ -247,10 +247,11 @@ void DrawExpandedAgyDashboard(
     const float padX = 18.0f;
 
     // ========================================================================
-    // ZONE A: Header Row (Title, Turn/Step Capsule, Status Badge)
+    // ========================================================================
+    // ZONE A: Dual Header Row (Icon, Project Name & Conversation Title, Turn/Step Capsule)
     // ========================================================================
     const float headerTop = rect.top + 12.0f;
-    const float headerHeight = 22.0f;
+    const float headerHeight = 30.0f; // 2-line dual header
     const float headerBottom = headerTop + headerHeight;
 
     // A1. Antigravity Icon Glyph ("✦")
@@ -272,13 +273,24 @@ void DrawExpandedAgyDashboard(
         headerTop + (headerHeight - pillH) * 0.5f + pillH
     );
 
-    // Clean Conversation Title
-    if (titleFormat) {
-        D2D1_RECT_F titleRect = D2D1::RectF(rect.left + padX + 18.0f, headerTop, turnPillRect.left - 8.0f, headerBottom);
-        titleFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        titleFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kTitle[] = L"Personal Windhawk Mods";
-        rt->DrawTextW(kTitle, static_cast<UINT32>(wcslen(kTitle)), titleFormat, titleRect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    // A3. Dual Header: Line 1 = Project Name, Line 2 = Active Conversation Title
+    const float headerTextLeft = rect.left + padX + 20.0f;
+    const float headerTextRight = turnPillRect.left - 8.0f;
+
+    if (microFormat) {
+        D2D1_RECT_F projRect = D2D1::RectF(headerTextLeft, headerTop, headerTextRight, headerTop + 13.0f);
+        microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        const wchar_t kProject[] = L"Personal Windhawk Mods";
+        rt->DrawTextW(kProject, static_cast<UINT32>(wcslen(kProject)), microFormat, projRect, brushMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+
+    if (boldFormat) {
+        D2D1_RECT_F titleRect = D2D1::RectF(headerTextLeft, headerTop + 13.0f, headerTextRight, headerBottom);
+        boldFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        boldFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        const wchar_t kTitle[] = L"Feature Intent: Dynamic Island AGY Polish & Telemetry";
+        rt->DrawTextW(kTitle, static_cast<UINT32>(wcslen(kTitle)), boldFormat, titleRect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
     rt->FillRoundedRectangle(D2D1::RoundedRect(turnPillRect, 10.0f, 10.0f), brushBentoBg.Get());
@@ -406,7 +418,7 @@ void DrawExpandedAgyDashboard(
         rt->DrawTextW(kSub1, static_cast<UINT32>(wcslen(kSub1)), microFormat, sub1Rect, brushGreen.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
-    // C2. Right Card: TOTAL ACTIONS
+    // C2. Right Card: ACTIVE EXECUTION (replacing redundant Step Card)
     D2D1_RECT_F actionsRect = D2D1::RectF(activeTimeRect.right + colGap, cardsTop, rect.right - padX, cardsBottom);
     rt->FillRoundedRectangle(D2D1::RoundedRect(actionsRect, 8.0f, 8.0f), brushBentoBg.Get());
     rt->DrawRoundedRectangle(D2D1::RoundedRect(actionsRect, 8.0f, 8.0f), brushBentoBorder.Get(), 1.0f);
@@ -429,19 +441,19 @@ void DrawExpandedAgyDashboard(
         D2D1_RECT_F lbl2Rect = D2D1::RectF(text2Left, actionsRect.top + 6.0f, actionsRect.right - 6.0f, actionsRect.top + 17.0f);
         microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kLbl2[] = L"TOTAL ACTIONS";
+        const wchar_t kLbl2[] = L"ACTIVE EXECUTION";
         rt->DrawTextW(kLbl2, static_cast<UINT32>(wcslen(kLbl2)), microFormat, lbl2Rect, brushMuted.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
         D2D1_RECT_F val2Rect = D2D1::RectF(text2Left, actionsRect.top + 17.0f, actionsRect.right - 6.0f, actionsRect.top + 33.0f);
         boldFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         boldFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kVal2[] = L"140 Steps";
+        const wchar_t kVal2[] = L"Coding Worker";
         rt->DrawTextW(kVal2, static_cast<UINT32>(wcslen(kVal2)), boldFormat, val2Rect, brushWhite.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
         D2D1_RECT_F sub2Rect = D2D1::RectF(text2Left, actionsRect.top + 34.0f, actionsRect.right - 6.0f, actionsRect.bottom - 5.0f);
         microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const wchar_t kSub2[] = L"2 Subagents Active";
+        const wchar_t kSub2[] = L"Executing • Updating Direct2D Layout";
         rt->DrawTextW(kSub2, static_cast<UINT32>(wcslen(kSub2)), microFormat, sub2Rect, brushGreen.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 }
@@ -522,7 +534,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
     ComPtr<IDWriteTextFormat> boldFmt;
     dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"en-us", &boldFmt);
+        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"en-us", &boldFmt);
 
     ComPtr<IDWriteTextFormat> bodyFmt;
     dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
@@ -535,6 +547,18 @@ int wmain(int argc, wchar_t* argv[]) {
     ComPtr<IDWriteTextFormat> microFmt;
     dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD,
         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 8.5f, L"en-us", &microFmt);
+
+    // Apply single-line no-wrap and ellipsis trimming for graceful truncation
+    DWRITE_TRIMMING trimming = { DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+    ComPtr<IDWriteInlineObject> ellipsisBold;
+    dwriteFactory->CreateEllipsisTrimmingSign(boldFmt.Get(), &ellipsisBold);
+    boldFmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    boldFmt->SetTrimming(&trimming, ellipsisBold.Get());
+
+    ComPtr<IDWriteInlineObject> ellipsisMicro;
+    dwriteFactory->CreateEllipsisTrimmingSign(microFmt.Get(), &ellipsisMicro);
+    microFmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    microFmt->SetTrimming(&trimming, ellipsisMicro.Get());
 
     // 6. Draw Content to Target
     rt->BeginDraw();
@@ -595,9 +619,9 @@ int wmain(int argc, wchar_t* argv[]) {
             D2D1::RectF(24.0f, 108.0f, 596.0f, 124.0f), labelBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
-    // Expanded Card Dimensions: 380px wide x 180px high, horizontally centered
+    // Expanded Card Dimensions: 380px wide x 152px high, horizontally centered
     const float cardW = 380.0f;
-    const float cardH = 180.0f;
+    const float cardH = 152.0f; // Clamped to 152px dynamic height (zero bottom gap)
     const float cardLeft = (canvasWidth - cardW) * 0.5f; // 120.0f
     const float cardTop = 136.0f;
     D2D1_RECT_F expandedCardRect = D2D1::RectF(cardLeft, cardTop, cardLeft + cardW, cardTop + cardH);

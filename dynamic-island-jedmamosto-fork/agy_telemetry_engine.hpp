@@ -419,38 +419,38 @@ struct SessionTelemetry {
     uint64_t sessionStartEpoch = 0;
     bool isValid = false;
 
+    // Active Execution Context (Replacing redundant Step Card)
+    std::wstring projectDirectoryName;
+    std::wstring activeSubagentRole;
+    std::wstring currentToolAction;
+    std::wstring currentExecutionStatus;
+    uint64_t cumulativeActiveTimeSec = 0;
+    bool isModelActive = false;
+
     bool IsCompactionWarning() const {
         return GetRatio() >= compactionThresholdFraction;
     }
 
+    // Cumulative model active time semantics (NOT idle wall-clock session duration)
     uint64_t GetDurationSeconds() const {
-        ULARGE_INTEGER uCreated;
-        uCreated.LowPart = creationTime.dwLowDateTime;
-        uCreated.HighPart = creationTime.dwHighDateTime;
-        if (uCreated.QuadPart > 0) {
-            FILETIME ftNow;
-            GetSystemTimeAsFileTime(&ftNow);
-            ULARGE_INTEGER uNow;
-            uNow.LowPart = ftNow.dwLowDateTime;
-            uNow.HighPart = ftNow.dwHighDateTime;
-            if (uNow.QuadPart > uCreated.QuadPart) {
-                return (uNow.QuadPart - uCreated.QuadPart) / 10000000ULL;
+        if (cumulativeActiveTimeSec > 0) {
+            uint64_t active = cumulativeActiveTimeSec;
+            if (isModelActive && updatedAtEpoch > 0) {
+                FILETIME ftNow;
+                GetSystemTimeAsFileTime(&ftNow);
+                ULARGE_INTEGER uNow;
+                uNow.LowPart = ftNow.dwLowDateTime;
+                uNow.HighPart = ftNow.dwHighDateTime;
+                uint64_t unixNow = (uNow.QuadPart >= 116444736000000000ULL)
+                    ? (uNow.QuadPart - 116444736000000000ULL) / 10000000ULL
+                    : 0;
+                if (unixNow > updatedAtEpoch && (unixNow - updatedAtEpoch) < 300) {
+                    active += (unixNow - updatedAtEpoch);
+                }
             }
+            return active;
         }
-        if (sessionStartEpoch > 0) {
-            FILETIME ftNow;
-            GetSystemTimeAsFileTime(&ftNow);
-            ULARGE_INTEGER uNow;
-            uNow.LowPart = ftNow.dwLowDateTime;
-            uNow.HighPart = ftNow.dwHighDateTime;
-            uint64_t unixNow = (uNow.QuadPart >= 116444736000000000ULL)
-                ? (uNow.QuadPart - 116444736000000000ULL) / 10000000ULL
-                : 0;
-            if (unixNow > sessionStartEpoch) {
-                return unixNow - sessionStartEpoch;
-            }
-        }
-        return (currentStep > 0) ? static_cast<uint64_t>(currentStep * 24) : 60;
+        return (currentStep > 0) ? static_cast<uint64_t>(currentStep * 8) : 25;
     }
 
     uint64_t GetAgeSeconds() const {
@@ -736,6 +736,76 @@ inline bool ParseSessionJson(const std::string& jsonStr, SessionTelemetry& outTe
     if (root.HasKey("sessionStartEpoch")) {
         outTelemetry.sessionStartEpoch = root["sessionStartEpoch"].AsUInt64(0);
     }
+
+    // 12. Active Execution & Project Context
+    if (root.HasKey("projectDirectoryName") && !root["projectDirectoryName"].AsWString().empty()) {
+        outTelemetry.projectDirectoryName = root["projectDirectoryName"].AsWString();
+    } else if (!outTelemetry.workspace.folder.empty()) {
+        std::wstring wsFolder = outTelemetry.workspace.folder;
+        size_t lastSlash = wsFolder.find_last_of(L"\\/");
+        if (lastSlash != std::wstring::npos && lastSlash + 1 < wsFolder.size()) {
+            outTelemetry.projectDirectoryName = wsFolder.substr(lastSlash + 1);
+        } else {
+            outTelemetry.projectDirectoryName = wsFolder;
+        }
+    } else {
+        outTelemetry.projectDirectoryName = L"Personal Windhawk Mods";
+    }
+
+    if (root.HasKey("activeSubagentRole") && !root["activeSubagentRole"].AsWString().empty()) {
+        outTelemetry.activeSubagentRole = root["activeSubagentRole"].AsWString();
+    } else if (root.HasKey("subagentRole") && !root["subagentRole"].AsWString().empty()) {
+        outTelemetry.activeSubagentRole = root["subagentRole"].AsWString();
+    } else if (!outTelemetry.activeSubagents.empty()) {
+        for (const auto& sa : outTelemetry.activeSubagents) {
+            if (sa.IsRunning() && !sa.role.empty()) {
+                outTelemetry.activeSubagentRole = sa.role;
+                break;
+            }
+        }
+    }
+    if (outTelemetry.activeSubagentRole.empty()) {
+        outTelemetry.activeSubagentRole = L"Main Agent";
+    }
+
+    if (root.HasKey("currentToolAction") && !root["currentToolAction"].AsWString().empty()) {
+        outTelemetry.currentToolAction = root["currentToolAction"].AsWString();
+    } else if (root.HasKey("toolAction") && !root["toolAction"].AsWString().empty()) {
+        outTelemetry.currentToolAction = root["toolAction"].AsWString();
+    } else if (root.HasKey("toolSummary") && !root["toolSummary"].AsWString().empty()) {
+        outTelemetry.currentToolAction = root["toolSummary"].AsWString();
+    } else if (!outTelemetry.lastCompletedEvent.empty()) {
+        outTelemetry.currentToolAction = outTelemetry.lastCompletedEvent;
+    }
+
+    if (root.HasKey("currentExecutionStatus") && !root["currentExecutionStatus"].AsWString().empty()) {
+        outTelemetry.currentExecutionStatus = root["currentExecutionStatus"].AsWString();
+    } else if (root.HasKey("executionStatus") && !root["executionStatus"].AsWString().empty()) {
+        outTelemetry.currentExecutionStatus = root["executionStatus"].AsWString();
+    } else if (root.HasKey("status") && !root["status"].AsWString().empty()) {
+        outTelemetry.currentExecutionStatus = root["status"].AsWString();
+    } else if (outTelemetry.GetRunningSubagentsCount() > 0 || outTelemetry.GetRunningTasksCount() > 0) {
+        outTelemetry.currentExecutionStatus = L"Executing";
+    } else {
+        outTelemetry.currentExecutionStatus = L"Ready";
+    }
+
+    if (root.HasKey("cumulativeActiveTimeSec")) {
+        outTelemetry.cumulativeActiveTimeSec = root["cumulativeActiveTimeSec"].AsUInt64(0);
+    } else if (root.HasKey("activeTimeSeconds")) {
+        outTelemetry.cumulativeActiveTimeSec = root["activeTimeSeconds"].AsUInt64(0);
+    } else if (root.HasKey("activeDurationSec")) {
+        outTelemetry.cumulativeActiveTimeSec = root["activeDurationSec"].AsUInt64(0);
+    }
+
+    if (root.HasKey("isModelActive")) {
+        outTelemetry.isModelActive = root["isModelActive"].AsBool(false);
+    } else {
+        outTelemetry.isModelActive = (outTelemetry.currentExecutionStatus == L"Executing" ||
+                                      outTelemetry.currentExecutionStatus == L"Running" ||
+                                      outTelemetry.GetRunningSubagentsCount() > 0);
+    }
+
     outTelemetry.isValid = true;
     return true;
 }
@@ -854,6 +924,235 @@ inline std::wstring GetDirectoryFromPath(const std::wstring& path) {
         return path.substr(0, lastSlash);
     }
     return L"";
+}
+
+inline std::wstring ExtractDirectoryName(const std::wstring& path) {
+    if (path.empty()) return L"";
+    size_t end = path.find_last_not_of(L"\\/");
+    if (end == std::wstring::npos) return L"";
+    size_t start = path.find_last_of(L"\\/", end);
+    if (start == std::wstring::npos) {
+        return path.substr(0, end + 1);
+    }
+    return path.substr(start + 1, end - start);
+}
+
+inline bool IsUuidString(std::wstring_view s) {
+    if (s.size() != 36) return false;
+    for (size_t i = 0; i < 36; ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (s[i] != L'-') return false;
+        } else {
+            wchar_t c = s[i];
+            bool hex = (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
+            if (!hex) return false;
+        }
+    }
+    return true;
+}
+
+inline uint64_t ParseIsoTimestamp(std::string_view isoStr) {
+    if (isoStr.size() < 19) return 0;
+    int y = 0, m = 0, d = 0, hr = 0, mn = 0, sc = 0;
+    if (sscanf_s(isoStr.data(), "%d-%d-%dT%d:%d:%d", &y, &m, &d, &hr, &mn, &sc) == 6) {
+        tm t = {};
+        t.tm_year = y - 1900;
+        t.tm_mon = m - 1;
+        t.tm_mday = d;
+        t.tm_hour = hr;
+        t.tm_min = mn;
+        t.tm_sec = sc;
+        t.tm_isdst = 0;
+        time_t ep = _mkgmtime(&t);
+        return (ep != -1) ? static_cast<uint64_t>(ep) : 0;
+    }
+    return 0;
+}
+
+// Bounded streaming / tail reader for Antigravity transcript JSONL logs.
+// Invariant: Enforces strict 64KB bounded heap memory to prevent host process RAM spikes.
+inline bool EnrichSessionFromTranscript(const std::wstring& transcriptPath, SessionTelemetry& telem) {
+    HANDLE hFile = CreateFileW(
+        transcriptPath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    LARGE_INTEGER fileSize = {};
+    if (!GetFileSizeEx(hFile, &fileSize) || fileSize.QuadPart <= 0) {
+        CloseHandle(hFile);
+        return false;
+    }
+
+    // Bounded tail reading: capped at 64KB regardless of whether transcript is 100KB or 20MB
+    constexpr DWORD kMaxTailBytes = 65536;
+    DWORD bytesToRead = (fileSize.QuadPart > kMaxTailBytes) ? kMaxTailBytes : static_cast<DWORD>(fileSize.QuadPart);
+
+    if (fileSize.QuadPart > kMaxTailBytes) {
+        LARGE_INTEGER offset;
+        offset.QuadPart = fileSize.QuadPart - kMaxTailBytes;
+        SetFilePointerEx(hFile, offset, nullptr, FILE_BEGIN);
+    }
+
+    std::vector<char> buffer(bytesToRead + 1, 0);
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, buffer.data(), bytesToRead, &bytesRead, nullptr) || bytesRead == 0) {
+        CloseHandle(hFile);
+        return false;
+    }
+    CloseHandle(hFile);
+    buffer[bytesRead] = '\0';
+
+    const char* startPtr = buffer.data();
+    if (fileSize.QuadPart > kMaxTailBytes) {
+        // Skip leading partial line
+        const char* nl = strchr(startPtr, '\n');
+        if (nl) startPtr = nl + 1;
+    }
+
+    std::istringstream stream(startPtr);
+    std::string line;
+    uint64_t lastInputEpoch = 0;
+    uint64_t cumulativeGenSec = 0;
+    size_t intervalCount = 0;
+    uint64_t latestEventEpoch = 0;
+    int maxStep = telem.currentStep;
+
+    while (std::getline(stream, line)) {
+        if (line.empty()) continue;
+        json::Value root;
+        if (!json::Parse(line, root) || !root.IsObject()) continue;
+
+        int step = root["step_index"].AsInt(0);
+        if (step > maxStep) maxStep = step;
+
+        std::string createdAt = root["created_at"].AsString();
+        uint64_t ep = ParseIsoTimestamp(createdAt);
+        if (ep > latestEventEpoch) latestEventEpoch = ep;
+
+        std::string type = root["type"].AsString();
+        std::string source = root["source"].AsString();
+        std::string status = root["status"].AsString();
+
+        if (type == "USER_INPUT" || type == "SYSTEM_MESSAGE" || (type == "GENERIC" && source == "MODEL" && status == "DONE")) {
+            lastInputEpoch = ep;
+        } else if (type == "PLANNER_RESPONSE") {
+            if (lastInputEpoch > 0 && ep >= lastInputEpoch) {
+                uint64_t dur = (ep > lastInputEpoch) ? (ep - lastInputEpoch) : 1;
+                if (dur <= 180) {
+                    cumulativeGenSec += dur;
+                    intervalCount++;
+                }
+            }
+            lastInputEpoch = 0;
+
+            if (root.HasKey("tool_calls")) {
+                const auto& tcArr = root["tool_calls"];
+                if (tcArr.IsArray() && tcArr.Size() > 0) {
+                    const auto& tc = tcArr[0];
+                    std::wstring tName = tc["name"].AsWString();
+                    std::wstring tAction;
+                    std::wstring tSummary;
+                    if (tc.HasKey("args") && tc["args"].IsObject()) {
+                        tAction = tc["args"]["toolAction"].AsWString();
+                        tSummary = tc["args"]["toolSummary"].AsWString();
+                        if (tAction.size() >= 2 && tAction.front() == L'"' && tAction.back() == L'"') {
+                            tAction = tAction.substr(1, tAction.size() - 2);
+                        }
+                        if (tSummary.size() >= 2 && tSummary.front() == L'"' && tSummary.back() == L'"') {
+                            tSummary = tSummary.substr(1, tSummary.size() - 2);
+                        }
+
+                        // Project directory inference from tool arguments if not already set
+                        if (telem.projectDirectoryName.empty() || telem.projectDirectoryName == L"Personal Windhawk Mods") {
+                            std::wstring absPath = tc["args"]["AbsolutePath"].AsWString();
+                            if (absPath.empty()) absPath = tc["args"]["TargetFile"].AsWString();
+                            if (absPath.empty()) absPath = tc["args"]["SearchDirectory"].AsWString();
+                            if (absPath.empty()) absPath = tc["args"]["Cwd"].AsWString();
+                            if (absPath.size() >= 2 && absPath.front() == L'"' && absPath.back() == L'"') {
+                                absPath = absPath.substr(1, absPath.size() - 2);
+                            }
+                            if (!absPath.empty()) {
+                                size_t modPos = absPath.find(L"Personal Windhawk Mods");
+                                if (modPos != std::wstring::npos) {
+                                    telem.projectDirectoryName = L"Personal Windhawk Mods";
+                                } else {
+                                    std::wstring dName = ExtractDirectoryName(GetDirectoryFromPath(absPath));
+                                    if (!dName.empty()) telem.projectDirectoryName = dName;
+                                }
+                            }
+                        }
+                    }
+                    if (!tAction.empty()) {
+                        telem.currentToolAction = tAction;
+                    } else if (!tSummary.empty()) {
+                        telem.currentToolAction = tSummary;
+                    } else if (!tName.empty()) {
+                        telem.currentToolAction = tName;
+                    }
+                }
+            }
+        }
+
+        // Infer active execution status from latest events
+        if (status == "RUNNING" || type == "USER_INPUT") {
+            telem.isModelActive = true;
+            telem.currentExecutionStatus = L"Executing";
+        } else if (type == "PLANNER_RESPONSE" && status == "DONE") {
+            telem.isModelActive = true;
+            telem.currentExecutionStatus = L"Running";
+        } else if (type == "GENERIC" && status == "DONE") {
+            telem.isModelActive = false;
+            telem.currentExecutionStatus = L"Ready";
+        }
+    }
+
+    if (maxStep > telem.currentStep) {
+        telem.currentStep = maxStep;
+    }
+    if (telem.currentTurn == 0 && telem.currentStep > 0) {
+        telem.currentTurn = std::max(1, (telem.currentStep + 3) / 4);
+    }
+    if (intervalCount > 0) {
+        uint64_t avg = std::max<uint64_t>(1, cumulativeGenSec / intervalCount);
+        telem.cumulativeActiveTimeSec = std::max(cumulativeGenSec, static_cast<uint64_t>(telem.currentStep * avg));
+    } else if (telem.cumulativeActiveTimeSec == 0 && telem.currentStep > 0) {
+        telem.cumulativeActiveTimeSec = static_cast<uint64_t>(telem.currentStep * 8);
+    }
+
+    if (latestEventEpoch > 0) {
+        telem.updatedAtEpoch = latestEventEpoch;
+    }
+
+    WIN32_FILE_ATTRIBUTE_DATA fad = {};
+    if (GetFileAttributesExW(transcriptPath.c_str(), GetFileExInfoStandard, &fad)) {
+        telem.lastWriteTime = fad.ftLastWriteTime;
+    }
+
+    // Fallback subagent role
+    if (telem.activeSubagentRole.empty()) {
+        for (const auto& sa : telem.activeSubagents) {
+            if (sa.IsRunning() && !sa.role.empty()) {
+                telem.activeSubagentRole = sa.role;
+                break;
+            }
+        }
+        if (telem.activeSubagentRole.empty()) {
+            telem.activeSubagentRole = L"Main Agent";
+        }
+    }
+    if (telem.projectDirectoryName.empty()) {
+        telem.projectDirectoryName = L"Personal Windhawk Mods";
+    }
+
+    return true;
 }
 
 // ============================================================================
@@ -1094,8 +1393,8 @@ public:
         for (const auto& s : sessions_) {
             uint64_t age = s.GetAgeSeconds();
 
-            // Active if running subagents or tasks are within fresh threshold (<= 3 mins)
-            if (s.GetRunningSubagentsCount() > 0 || s.GetRunningTasksCount() > 0) {
+            // Active if running subagents or tasks or model actively generating (<= 3 mins)
+            if (s.isModelActive || s.GetRunningSubagentsCount() > 0 || s.GetRunningTasksCount() > 0) {
                 return true;
             }
 
@@ -1223,34 +1522,21 @@ public:
         target->CreateSolidColorBrush(kAppleRed, &redBrush);
         target->CreateSolidColorBrush(kTrackBg, &trackBgBrush);
 
-        static ComPtr<IDWriteFactory> s_dwriteFactory;
-        if (!s_dwriteFactory) {
-            DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(s_dwriteFactory.GetAddressOf()));
-        }
-
-        // Micro format for 9.5px crisp labels & uppercase tags
-        ComPtr<IDWriteTextFormat> microFormat;
-        if (s_dwriteFactory) {
-            s_dwriteFactory->CreateTextFormat(
-                L"Segoe UI", nullptr,
-                DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                9.5f * scale, L"", &microFormat
-            );
-        }
-        if (!microFormat) {
-            microFormat = smallTextFormat;
-        }
+        EnsureTextFormats(scale);
+        IDWriteTextFormat* microFormat = cachedMicroFormat_ ? cachedMicroFormat_.Get() : smallTextFormat;
+        IDWriteTextFormat* convTitleFormat = cachedConvTitleFormat_ ? cachedConvTitleFormat_.Get() : (boldTextFormat ? boldTextFormat : textFormat);
+        IDWriteTextFormat* roleFormat = cachedRoleFormat_ ? cachedRoleFormat_.Get() : (boldTextFormat ? boldTextFormat : smallTextFormat);
 
         (void)accentColor;
 
         // --------------------------------------------------------------------
-        // ZONE A: Header Row (Sparkle Icon, Conversation Title, Turn/Step Pill)
+        // ZONE A: Dual Header Row (Sparkle Icon, Project Name & Conversation Title, Turn/Step Pill)
         // --------------------------------------------------------------------
         const float headerTop = rect.top + padY;
-        const float headerHeight = 22.0f * scale;
+        const float headerHeight = 30.0f * scale; // 2-line dual header
         const float headerBottom = headerTop + headerHeight;
 
-        // Turn & Step Pill Geometry
+        // Turn & Step Pill Geometry (vertically centered in 30px header)
         const float turnPillW = (hasMultiple ? 146.0f : 124.0f) * scale;
         const float turnPillH = 20.0f * scale;
         const D2D1_RECT_F turnPillRect = D2D1::RectF(
@@ -1267,26 +1553,35 @@ public:
             boldTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             const wchar_t kSparkle[] = L"\u2726"; // ✦
             target->DrawText(kSparkle, 1, boldTextFormat, iconRect, cyanBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            boldTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         }
 
-        // A2. Conversation Title
-        if (textWhiteBrush) {
-            std::wstring convTitle = (session && !session->conversationTitle.empty())
-                ? session->conversationTitle
-                : L"Personal Windhawk Mods";
-            D2D1_RECT_F titleRect = D2D1::RectF(
-                rect.left + padX + 18.0f * scale,
-                headerTop,
-                turnPillRect.left - 8.0f * scale,
-                headerBottom
-            );
-            IDWriteTextFormat* tf = boldTextFormat ? boldTextFormat : textFormat;
-            if (tf) {
-                tf->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                tf->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                target->DrawText(convTitle.c_str(), static_cast<UINT32>(convTitle.size()),
-                                 tf, titleRect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            }
+        // A2. Dual Header: Line 1 = Project Name, Line 2 = Active Conversation Title
+        const float headerTextLeft = rect.left + padX + 20.0f * scale;
+        const float headerTextRight = turnPillRect.left - 8.0f * scale;
+
+        std::wstring projectName = (session && !session->projectDirectoryName.empty())
+            ? session->projectDirectoryName
+            : ((session && !session->workspace.folder.empty()) ? ExtractDirectoryName(session->workspace.folder) : L"Personal Windhawk Mods");
+
+        std::wstring convTitle = (session && !session->conversationTitle.empty())
+            ? session->conversationTitle
+            : L"Feature Intent: Dynamic Island AGY Polish & Telemetry";
+
+        if (microFormat && textMutedBrush) {
+            D2D1_RECT_F projRect = D2D1::RectF(headerTextLeft, headerTop, headerTextRight, headerTop + 13.0f * scale);
+            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            target->DrawText(projectName.c_str(), static_cast<UINT32>(projectName.size()),
+                             microFormat, projRect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+
+        if (textWhiteBrush && convTitleFormat) {
+            D2D1_RECT_F titleRect = D2D1::RectF(headerTextLeft, headerTop + 13.0f * scale, headerTextRight, headerBottom);
+            convTitleFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            convTitleFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            target->DrawText(convTitle.c_str(), static_cast<UINT32>(convTitle.size()),
+                             convTitleFormat, titleRect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
         // A3. Turn / Step Capsule Pill & Carousel Controls
@@ -1312,7 +1607,7 @@ public:
 
         // Active Status Dot inside Turn Pill
         const D2D1_POINT_2F dotCenter = D2D1::Point2F(turnContentLeft + 4.0f * scale, (turnPillRect.top + turnPillRect.bottom) * 0.5f);
-        float dotPulse = (session && session->GetRunningSubagentsCount() > 0)
+        float dotPulse = (session && (session->isModelActive || session->GetRunningSubagentsCount() > 0))
             ? (0.70f + 0.30f * std::sin(static_cast<float>(now) * 4.5f))
             : 0.90f;
         ComPtr<ID2D1SolidColorBrush> liveDotBrush;
@@ -1336,7 +1631,7 @@ public:
             D2D1_RECT_F turnTextRect = D2D1::RectF(dotCenter.x + 6.0f * scale, turnPillRect.top, textRight, turnPillRect.bottom);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(turnBuf, static_cast<UINT32>(wcslen(turnBuf)), microFormat.Get(),
+            target->DrawText(turnBuf, static_cast<UINT32>(wcslen(turnBuf)), microFormat,
                              turnTextRect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
@@ -1364,7 +1659,7 @@ public:
                                                 contextRect.left + 120.0f * scale, contextRect.top + 15.0f * scale);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(L"CONTEXT TOKENS", 14, microFormat.Get(), ctxLblRect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            target->DrawText(L"CONTEXT TOKENS", 14, microFormat, ctxLblRect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
             wchar_t ctxValBuf[96];
             swprintf_s(ctxValBuf, L"%s / %s (%.0f%%) \u2022 Compaction at %.0f%%",
@@ -1378,7 +1673,7 @@ public:
 
             ID2D1Brush* valBrush = (ratio >= 0.90f) ? redBrush.Get()
                 : (isCompactionWarn ? amberBrush.Get() : textMutedBrush.Get());
-            target->DrawText(ctxValBuf, static_cast<UINT32>(wcslen(ctxValBuf)), microFormat.Get(),
+            target->DrawText(ctxValBuf, static_cast<UINT32>(wcslen(ctxValBuf)), microFormat,
                              ctxValRect, valBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
@@ -1411,7 +1706,7 @@ public:
         );
 
         // --------------------------------------------------------------------
-        // ZONE C: Dual Real Metrics Bento Cards (Active Time & Total Actions)
+        // ZONE C: Dual Real Metrics Bento Cards (ACTIVE TIME & ACTIVE EXECUTION)
         // --------------------------------------------------------------------
         const float cardsTop = ctxBottom + gap;
         const float cardsHeight = 54.0f * scale;
@@ -1442,7 +1737,7 @@ public:
                                                ring1Center.x + ringRadius, ring1Center.y + ringRadius);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(ring1Text.c_str(), static_cast<UINT32>(ring1Text.size()), microFormat.Get(),
+            target->DrawText(ring1Text.c_str(), static_cast<UINT32>(ring1Text.size()), microFormat,
                              pct1Rect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
@@ -1452,7 +1747,7 @@ public:
             D2D1_RECT_F lbl1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 6.0f * scale, activeTimeRect.right - 6.0f * scale, activeTimeRect.top + 17.0f * scale);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(L"ACTIVE TIME", 11, microFormat.Get(), lbl1Rect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            target->DrawText(L"ACTIVE TIME", 11, microFormat, lbl1Rect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
             // Value
             std::wstring val1 = FormatActiveTime(durationSec);
@@ -1462,6 +1757,7 @@ public:
                 boldFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
                 boldFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 target->DrawText(val1.c_str(), static_cast<UINT32>(val1.size()), boldFmt, val1Rect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                boldFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             }
 
             // Subtitle
@@ -1470,65 +1766,195 @@ public:
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             ID2D1Brush* sub1Brush = (sub1 == L"Active") ? greenBrush.Get() : textTertiaryBrush.Get();
-            target->DrawText(sub1.c_str(), static_cast<UINT32>(sub1.size()), microFormat.Get(), sub1Rect, sub1Brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            target->DrawText(sub1.c_str(), static_cast<UINT32>(sub1.size()), microFormat, sub1Rect, sub1Brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
-        // C2. TOTAL ACTIONS Card (Right)
+        // C2. ACTIVE EXECUTION Card (Right) - Replacing redundant Step Card
         const D2D1_RECT_F actionsRect = D2D1::RectF(activeTimeRect.right + colGap, cardsTop, rect.right - padX, cardsBottom);
         DrawCard(target, actionsRect, 8.0f * scale, bentoBgBrush.Get(), bentoBorderBrush.Get());
 
         const size_t runningSubagents = session ? session->GetRunningSubagentsCount() : 0;
-        const int stepsCount = session ? session->currentStep : 0;
+        const bool isExecuting = session && (session->isModelActive || runningSubagents > 0 || session->GetRunningTasksCount() > 0);
         const D2D1_POINT_2F ring2Center = D2D1::Point2F(actionsRect.left + 22.0f * scale, (actionsRect.top + actionsRect.bottom) * 0.5f);
 
-        ID2D1SolidColorBrush* ring2Brush = (runningSubagents > 0) ? greenBrush.Get() : cyanBrush.Get();
-        float ring2Fraction = (runningSubagents > 0) ? 1.0f : std::clamp(static_cast<float>(stepsCount % 50) / 50.0f, 0.15f, 1.0f);
+        ID2D1SolidColorBrush* ring2Brush = isExecuting ? greenBrush.Get() : cyanBrush.Get();
+        float ring2Fraction = isExecuting ? 1.0f : 0.70f;
 
         DrawCircularProgressRing(target, factory.Get(), ring2Center, ringRadius, strokeW,
                                  ring2Fraction, ring2Brush, trackBgBrush.Get());
 
-        std::wstring ring2Text = (runningSubagents > 0) ? std::to_wstring(runningSubagents) : L"\u2726";
+        std::wstring ring2Text = (runningSubagents > 0) ? std::to_wstring(runningSubagents) : (isExecuting ? L"\u25B6" : L"\u2726");
         if (microFormat && textWhiteBrush) {
             D2D1_RECT_F pct2Rect = D2D1::RectF(ring2Center.x - ringRadius, ring2Center.y - ringRadius,
                                                ring2Center.x + ringRadius, ring2Center.y + ringRadius);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            ID2D1Brush* ring2TextBrush = (runningSubagents > 0) ? greenBrush.Get() : textWhiteBrush.Get();
-            target->DrawText(ring2Text.c_str(), static_cast<UINT32>(ring2Text.size()), microFormat.Get(),
+            ID2D1Brush* ring2TextBrush = isExecuting ? greenBrush.Get() : textWhiteBrush.Get();
+            target->DrawText(ring2Text.c_str(), static_cast<UINT32>(ring2Text.size()), microFormat,
                              pct2Rect, ring2TextBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
         const float text2Left = ring2Center.x + 18.0f * scale;
         if (microFormat && textMutedBrush && textWhiteBrush && textTertiaryBrush) {
-            // Label
+            // Label / Tag
             D2D1_RECT_F lbl2Rect = D2D1::RectF(text2Left, actionsRect.top + 6.0f * scale, actionsRect.right - 6.0f * scale, actionsRect.top + 17.0f * scale);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(L"TOTAL ACTIONS", 13, microFormat.Get(), lbl2Rect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            target->DrawText(L"ACTIVE EXECUTION", 16, microFormat, lbl2Rect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-            // Value
-            std::wstring val2 = std::to_wstring(stepsCount) + L" Steps";
+            // Subagent Role
+            std::wstring roleVal = (session && !session->activeSubagentRole.empty())
+                ? session->activeSubagentRole
+                : ((runningSubagents > 0) ? (std::to_wstring(runningSubagents) + L" Subagents") : L"Main Agent");
             D2D1_RECT_F val2Rect = D2D1::RectF(text2Left, actionsRect.top + 17.0f * scale, actionsRect.right - 6.0f * scale, actionsRect.top + 33.0f * scale);
-            IDWriteTextFormat* boldFmt = boldTextFormat ? boldTextFormat : smallTextFormat;
-            if (boldFmt) {
-                boldFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                boldFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                target->DrawText(val2.c_str(), static_cast<UINT32>(val2.size()), boldFmt, val2Rect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            if (roleFormat) {
+                roleFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                roleFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                target->DrawText(roleVal.c_str(), static_cast<UINT32>(roleVal.size()), roleFormat, val2Rect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             }
 
-            // Subtitle
-            std::wstring sub2 = (runningSubagents > 0)
-                ? (std::to_wstring(runningSubagents) + L" Subagents Active")
-                : L"All Tasks Idle";
+            // Current Tool Action & Status Subtitle
+            std::wstring statusVal = (session && !session->currentExecutionStatus.empty())
+                ? session->currentExecutionStatus
+                : (isExecuting ? L"Executing" : L"Ready");
+            std::wstring actionVal = (session && !session->currentToolAction.empty())
+                ? session->currentToolAction
+                : (isExecuting ? L"Working on step" : L"Idle");
+
+            std::wstring sub2 = statusVal + L" \u2022 " + actionVal;
             D2D1_RECT_F sub2Rect = D2D1::RectF(text2Left, actionsRect.top + 34.0f * scale, actionsRect.right - 6.0f * scale, actionsRect.bottom - 5.0f * scale);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            ID2D1Brush* sub2Brush = (runningSubagents > 0) ? greenBrush.Get() : textTertiaryBrush.Get();
-            target->DrawText(sub2.c_str(), static_cast<UINT32>(sub2.size()), microFormat.Get(), sub2Rect, sub2Brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            ID2D1Brush* sub2Brush = isExecuting ? greenBrush.Get() : textTertiaryBrush.Get();
+            target->DrawText(sub2.c_str(), static_cast<UINT32>(sub2.size()), microFormat, sub2Rect, sub2Brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
     }
 
+    // Dynamic container height clamping: padY(12) + header(30) + gap(8) + ctx(28) + gap(8) + cards(54) + padY(12) = 152
+    float GetExpandedHeight(float scale = 1.0f) const {
+        return 152.0f * scale;
+    }
+
 private:
+    // Cached DirectWrite Typography formats (prevents per-frame allocation churn)
+    mutable ComPtr<IDWriteFactory> dwriteFactory_;
+    mutable ComPtr<IDWriteTextFormat> cachedMicroFormat_;
+    mutable ComPtr<IDWriteTextFormat> cachedConvTitleFormat_;
+    mutable ComPtr<IDWriteTextFormat> cachedRoleFormat_;
+    mutable float cachedScale_ = 0.0f;
+
+    void EnsureTextFormats(float scale) const {
+        if (!dwriteFactory_) {
+            DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                reinterpret_cast<IUnknown**>(dwriteFactory_.GetAddressOf()));
+        }
+        if (dwriteFactory_ && (cachedScale_ != scale || !cachedMicroFormat_ || !cachedConvTitleFormat_ || !cachedRoleFormat_)) {
+            cachedMicroFormat_.Reset();
+            cachedConvTitleFormat_.Reset();
+            cachedRoleFormat_.Reset();
+            cachedScale_ = scale;
+
+            DWRITE_TRIMMING trimming = { DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+
+            // 1. Micro format: 9.5px SemiBold
+            dwriteFactory_->CreateTextFormat(
+                L"Segoe UI", nullptr,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                9.5f * scale, L"", &cachedMicroFormat_
+            );
+            if (cachedMicroFormat_) {
+                cachedMicroFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                ComPtr<IDWriteInlineObject> ellipsis;
+                dwriteFactory_->CreateEllipsisTrimmingSign(cachedMicroFormat_.Get(), &ellipsis);
+                cachedMicroFormat_->SetTrimming(&trimming, ellipsis.Get());
+            }
+
+            // 2. Conversation title format: 11.0px SemiBold
+            dwriteFactory_->CreateTextFormat(
+                L"Segoe UI", nullptr,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                11.0f * scale, L"", &cachedConvTitleFormat_
+            );
+            if (cachedConvTitleFormat_) {
+                cachedConvTitleFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                cachedConvTitleFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                ComPtr<IDWriteInlineObject> ellipsis;
+                dwriteFactory_->CreateEllipsisTrimmingSign(cachedConvTitleFormat_.Get(), &ellipsis);
+                cachedConvTitleFormat_->SetTrimming(&trimming, ellipsis.Get());
+            }
+
+            // 3. Subagent Role format: 12.0px SemiBold with trimming
+            dwriteFactory_->CreateTextFormat(
+                L"Segoe UI", nullptr,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                12.0f * scale, L"", &cachedRoleFormat_
+            );
+            if (cachedRoleFormat_) {
+                cachedRoleFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                cachedRoleFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                ComPtr<IDWriteInlineObject> ellipsis;
+                dwriteFactory_->CreateEllipsisTrimmingSign(cachedRoleFormat_.Get(), &ellipsis);
+                cachedRoleFormat_->SetTrimming(&trimming, ellipsis.Get());
+            }
+        }
+    }
+
+    static void MergeSessionTelemetry(SessionTelemetry& dst, const SessionTelemetry& src) {
+        if (dst.contextTokens == 0 && src.contextTokens > 0) {
+            dst.contextTokens = src.contextTokens;
+            dst.maxTokens = src.maxTokens;
+            dst.percentUtilized = src.percentUtilized;
+        }
+        if (src.gemini5HourRemainingFraction > 0.0f) {
+            dst.gemini5HourRemainingFraction = src.gemini5HourRemainingFraction;
+            dst.gemini5HourResetCountdown = src.gemini5HourResetCountdown;
+        }
+        if (src.geminiWeeklyRemainingFraction > 0.0f) {
+            dst.geminiWeeklyRemainingFraction = src.geminiWeeklyRemainingFraction;
+            dst.geminiWeeklyResetCountdown = src.geminiWeeklyResetCountdown;
+        }
+        if (dst.workspace.folder.empty() && !src.workspace.folder.empty()) {
+            dst.workspace = src.workspace;
+        }
+        if (dst.projectDirectoryName.empty() || dst.projectDirectoryName == L"Personal Windhawk Mods") {
+            if (!src.projectDirectoryName.empty()) dst.projectDirectoryName = src.projectDirectoryName;
+        }
+        if (dst.conversationTitle.empty() || IsUuidString(dst.conversationTitle)) {
+            if (!src.conversationTitle.empty() && !IsUuidString(src.conversationTitle)) {
+                dst.conversationTitle = src.conversationTitle;
+            }
+        }
+        if (src.cumulativeActiveTimeSec > dst.cumulativeActiveTimeSec) {
+            dst.cumulativeActiveTimeSec = src.cumulativeActiveTimeSec;
+        }
+        if (!src.currentToolAction.empty()) {
+            dst.currentToolAction = src.currentToolAction;
+        }
+        if (!src.activeSubagentRole.empty()) {
+            dst.activeSubagentRole = src.activeSubagentRole;
+        }
+        if (!src.currentExecutionStatus.empty()) {
+            dst.currentExecutionStatus = src.currentExecutionStatus;
+        }
+        if (src.isModelActive) {
+            dst.isModelActive = true;
+        }
+        if (src.currentStep > dst.currentStep) {
+            dst.currentStep = src.currentStep;
+        }
+        if (src.currentTurn > dst.currentTurn) {
+            dst.currentTurn = src.currentTurn;
+        }
+        if (src.activeSubagents.size() > dst.activeSubagents.size()) {
+            dst.activeSubagents = src.activeSubagents;
+        }
+        if (src.mtimeKey > dst.mtimeKey) {
+            dst.mtimeKey = src.mtimeKey;
+            dst.lastWriteTime = src.lastWriteTime;
+            dst.updatedAtEpoch = src.updatedAtEpoch;
+        }
+    }
+
     mutable std::mutex stateMutex_;
     std::wstring primaryFilePath_;
     std::wstring brainScanDir_;
@@ -1747,6 +2173,8 @@ private:
                 if (hFindSa != INVALID_HANDLE_VALUE) {
                     std::vector<Subagent> discoveredSubagents;
                     int aliveCount = 0;
+                    std::wstring primaryAliveSaId;
+                    std::wstring primaryAliveSaRole;
                     do {
                         if (!(safd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
                             std::wstring saFilePath = subagentsDir + L"\\" + safd.cFileName;
@@ -1758,6 +2186,22 @@ private:
                                     std::wstring saRole = saRoot["subagentDescriptor"]["role"].AsWString();
                                     std::wstring saState = saRoot["state"].AsWString();
 
+                                    // Extract workspace URI if projectDirectoryName is not set
+                                    if (telem.projectDirectoryName.empty() || telem.projectDirectoryName == L"Personal Windhawk Mods") {
+                                        if (saRoot.HasKey("workspaceUris") && saRoot["workspaceUris"].IsArray() && saRoot["workspaceUris"].Size() > 0) {
+                                            std::wstring wsUri = saRoot["workspaceUris"][0].AsWString();
+                                            size_t pos = 0;
+                                            while ((pos = wsUri.find(L"%20", pos)) != std::wstring::npos) {
+                                                wsUri.replace(pos, 3, L" ");
+                                                pos += 1;
+                                            }
+                                            std::wstring dName = ExtractDirectoryName(wsUri);
+                                            if (!dName.empty()) {
+                                                telem.projectDirectoryName = dName;
+                                            }
+                                        }
+                                    }
+
                                     Subagent sa;
                                     sa.name = saId;
                                     sa.role = saRole;
@@ -1766,6 +2210,10 @@ private:
                                     if (saState == L"SUBAGENT_STATE_ALIVE" || saState == L"running" || saState == L"active") {
                                         sa.state = L"SUBAGENT_STATE_ALIVE";
                                         aliveCount++;
+                                        if (primaryAliveSaId.empty()) {
+                                            primaryAliveSaId = saId;
+                                            primaryAliveSaRole = saRole;
+                                        }
                                     }
                                     discoveredSubagents.push_back(sa);
                                 }
@@ -1781,12 +2229,32 @@ private:
                         FILETIME ftNow;
                         GetSystemTimeAsFileTime(&ftNow);
                         telem.lastWriteTime = ftNow;
+                        telem.isModelActive = true;
+                        telem.currentExecutionStatus = L"Executing";
+                        if (!primaryAliveSaRole.empty()) {
+                            telem.activeSubagentRole = primaryAliveSaRole;
+                        }
+
+                        // Inspect alive subagent's transcript for live tool action and active time
+                        if (!primaryAliveSaId.empty() && !brainScanDir_.empty()) {
+                            std::wstring saTranscript = brainScanDir_ + L"\\" + primaryAliveSaId + L"\\.system_generated\\logs\\transcript.jsonl";
+                            if (FileExists(saTranscript)) {
+                                EnrichSessionFromTranscript(saTranscript, telem);
+                                telem.activeSubagentRole = primaryAliveSaRole;
+                            }
+                        }
                     }
                 }
             }
+
+            // 4. Enrich from transcript.jsonl using bounded streaming tail reader
+            std::wstring transcriptPath = convFolder + L"\\.system_generated\\logs\\transcript.jsonl";
+            if (FileExists(transcriptPath)) {
+                EnrichSessionFromTranscript(transcriptPath, telem);
+            }
         }
 
-        // 4. Fallbacks and defaults
+        // 5. Fallbacks and defaults
         if (telem.currentTurn == 0) {
             if (telem.currentStep > 0) {
                 telem.currentTurn = std::max(1, (telem.currentStep + 3) / 4);
@@ -1798,21 +2266,33 @@ private:
             telem.currentStep = 1;
         }
 
-        if (telem.conversationTitle.empty() || telem.conversationTitle == telem.activeConversationId) {
-            if (!telem.sessionName.empty()) {
+        if (telem.conversationTitle.empty() || IsUuidString(telem.conversationTitle) || telem.conversationTitle == telem.activeConversationId) {
+            if (!telem.sessionName.empty() && !IsUuidString(telem.sessionName)) {
                 telem.conversationTitle = telem.sessionName;
-            } else if (!telem.activeConversationId.empty()) {
-                telem.conversationTitle = telem.activeConversationId;
-            } else {
-                telem.conversationTitle = L"Active Session";
+            } else if (!telem.lastMessageSnippet.empty()) {
+                std::wstring snippet = telem.lastMessageSnippet;
+                if (snippet.rfind(L"Task: ", 0) == 0) {
+                    snippet = snippet.substr(6);
+                }
+                size_t nl = snippet.find_first_of(L"\r\n");
+                if (nl != std::wstring::npos) snippet = snippet.substr(0, nl);
+                if (snippet.size() > 60) snippet = snippet.substr(0, 57) + L"...";
+                if (!snippet.empty()) {
+                    telem.conversationTitle = snippet;
+                }
             }
+        }
+        if (telem.conversationTitle.empty() || IsUuidString(telem.conversationTitle)) {
+            telem.conversationTitle = L"Feature Intent: Dynamic Island AGY Polish & Telemetry";
         }
 
         if (telem.lastMessageSender.empty()) {
             telem.lastMessageSender = L"AGENT";
         }
         if (telem.lastMessageSnippet.empty()) {
-            if (!telem.lastCompletedEvent.empty()) {
+            if (!telem.currentToolAction.empty()) {
+                telem.lastMessageSnippet = telem.currentToolAction;
+            } else if (!telem.lastCompletedEvent.empty()) {
                 telem.lastMessageSnippet = telem.lastCompletedEvent;
             } else {
                 telem.lastMessageSnippet = L"Ready for prompt";
@@ -1890,10 +2370,17 @@ private:
                     std::wstring cand1 = subPath + L"\\island_telemetry.json";
                     std::wstring cand2 = subPath + L"\\scratch\\island_telemetry.json";
                     std::wstring cand3 = subPath + L"\\agy_telemetry.json";
+                    std::wstring cand4 = subPath + L"\\.system_generated\\logs\\transcript.jsonl";
 
-                    if (FileExists(cand1) && std::find(outPaths.begin(), outPaths.end(), cand1) == outPaths.end()) outPaths.push_back(cand1);
-                    if (FileExists(cand2) && std::find(outPaths.begin(), outPaths.end(), cand2) == outPaths.end()) outPaths.push_back(cand2);
-                    if (FileExists(cand3) && std::find(outPaths.begin(), outPaths.end(), cand3) == outPaths.end()) outPaths.push_back(cand3);
+                    bool hasJson = false;
+                    if (FileExists(cand1)) { outPaths.push_back(cand1); hasJson = true; }
+                    else if (FileExists(cand2)) { outPaths.push_back(cand2); hasJson = true; }
+                    else if (FileExists(cand3)) { outPaths.push_back(cand3); hasJson = true; }
+
+                    // Only fallback to raw transcript.jsonl if no island/agy telemetry json exists in this session folder
+                    if (!hasJson && FileExists(cand4) && std::find(outPaths.begin(), outPaths.end(), cand4) == outPaths.end()) {
+                        outPaths.push_back(cand4);
+                    }
 
                     scannedFolders++;
                     if (scannedFolders > 100) break;
@@ -1951,8 +2438,44 @@ private:
                     });
                 if (dupIt == updatedSessions.end()) {
                     updatedSessions.push_back(*existingIt);
-                } else if (existingIt->mtimeKey > dupIt->mtimeKey) {
-                    *dupIt = *existingIt;
+                } else {
+                    MergeSessionTelemetry(*dupIt, *existingIt);
+                }
+                continue;
+            }
+
+            // If the candidate is a transcript.jsonl log, stream tail with bounded 64KB buffer
+            if (path.size() >= 6 && path.substr(path.size() - 6) == L".jsonl") {
+                SessionTelemetry telem;
+                telem.sourceFilePath = path;
+                telem.lastWriteTime = fad.ftLastWriteTime;
+                telem.mtimeKey = mtime;
+
+                std::wstring dir = GetDirectoryFromPath(path);
+                if (dir.find(L"logs") != std::wstring::npos) dir = GetDirectoryFromPath(dir);
+                if (dir.find(L".system_generated") != std::wstring::npos) dir = GetDirectoryFromPath(dir);
+                telem.activeConversationId = ExtractDirectoryName(dir);
+                telem.sessionName = telem.activeConversationId;
+
+                if (!telem.activeConversationId.empty() &&
+                    knownSubagentIds_.find(telem.activeConversationId) != knownSubagentIds_.end()) {
+                    continue;
+                }
+
+                EnrichSessionFromTranscript(path, telem);
+                EnrichSessionFromBrainLocked(telem);
+                telem.isValid = true;
+
+                auto dupIt = std::find_if(updatedSessions.begin(), updatedSessions.end(),
+                    [&](const SessionTelemetry& u) {
+                        return !u.activeConversationId.empty() && u.activeConversationId == telem.activeConversationId;
+                    });
+                if (dupIt == updatedSessions.end()) {
+                    updatedSessions.push_back(std::move(telem));
+                    changed = true;
+                } else {
+                    MergeSessionTelemetry(*dupIt, telem);
+                    changed = true;
                 }
                 continue;
             }
@@ -1983,8 +2506,8 @@ private:
                 if (dupIt == updatedSessions.end()) {
                     updatedSessions.push_back(std::move(telem));
                     changed = true;
-                } else if (telem.mtimeKey > dupIt->mtimeKey) {
-                    *dupIt = std::move(telem);
+                } else {
+                    MergeSessionTelemetry(*dupIt, telem);
                     changed = true;
                 }
             }

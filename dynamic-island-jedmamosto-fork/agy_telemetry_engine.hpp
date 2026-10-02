@@ -407,7 +407,7 @@ struct SessionTelemetry {
     std::wstring gemini5HourResetCountdown = L"Resets in 4h 27m";
     float geminiWeeklyRemainingFraction = 0.48f; // 0.0 to 1.0
     std::wstring geminiWeeklyResetCountdown = L"Resets in 5d 23h";
-    float compactionThresholdFraction = 0.80f; // 0.0 to 1.0
+    float compactionThresholdFraction = 0.21f; // 0.0 to 1.0 (21% compaction warning)
 
     uint64_t contextTokens = 0;
     uint64_t maxTokens = 1048576;
@@ -606,15 +606,15 @@ inline bool ParseSessionJson(const std::string& jsonStr, SessionTelemetry& outTe
         outTelemetry.geminiWeeklyResetCountdown = L"Resets in 5d 23h";
     }
 
-    // 4. Compaction threshold (default 0.80f)
+    // 4. Compaction threshold (default 0.21f)
     if (root.HasKey("compactionThreshold")) {
-        double val = root["compactionThreshold"].AsDouble(0.80);
+        double val = root["compactionThreshold"].AsDouble(0.21);
         outTelemetry.compactionThresholdFraction = static_cast<float>((val > 1.0) ? (val / 100.0) : val);
     } else if (root.HasKey("compactionThresholdFraction")) {
-        double val = root["compactionThresholdFraction"].AsDouble(0.80);
+        double val = root["compactionThresholdFraction"].AsDouble(0.21);
         outTelemetry.compactionThresholdFraction = static_cast<float>((val > 1.0) ? (val / 100.0) : val);
     } else {
-        outTelemetry.compactionThresholdFraction = 0.80f;
+        outTelemetry.compactionThresholdFraction = 0.21f;
     }
 
     // 5. Active Subagents
@@ -1148,8 +1148,8 @@ inline bool EnrichSessionFromTranscript(const std::wstring& transcriptPath, Sess
         std::string source = root["source"].AsString();
         std::string status = root["status"].AsString();
 
-        // Extract user prompt for conversation title if not yet set
-        if (type == "USER_INPUT" && (telem.conversationTitle.empty() || IsUuidString(telem.conversationTitle))) {
+        // Extract user prompt snippet for fallback display without overwriting SQLite title
+        if (type == "USER_INPUT" && telem.lastMessageSnippet.empty()) {
             std::string content = root["content"].AsString();
             size_t reqStart = content.find("<USER_REQUEST>");
             if (reqStart != std::string::npos) {
@@ -1163,7 +1163,7 @@ inline bool EnrichSessionFromTranscript(const std::wstring& transcriptPath, Sess
                         size_t firstNl = userReq.find_first_of("\r\n");
                         if (firstNl != std::string::npos) userReq = userReq.substr(0, firstNl);
                         if (userReq.size() > 60) userReq = userReq.substr(0, 57) + "...";
-                        telem.conversationTitle = Utf8ToWide(userReq);
+                        telem.lastMessageSnippet = Utf8ToWide(userReq);
                     }
                 }
             }
@@ -1298,7 +1298,7 @@ inline bool EnrichSessionFromTranscript(const std::wstring& transcriptPath, Sess
         }
     }
     if (telem.projectDirectoryName.empty() || telem.projectDirectoryName == L"antigravity-handoff") {
-        telem.projectDirectoryName = L"Personal Windhawk Mods";
+        telem.projectDirectoryName = L"Workspace";
     }
 
     return true;
@@ -1326,7 +1326,7 @@ public:
     AgyTelemetryEngine(const AgyTelemetryEngine&) = delete;
     AgyTelemetryEngine& operator=(const AgyTelemetryEngine&) = delete;
 
-    void Initialize(const std::wstring& primaryFilePath = L"C:\\Users\\ASUS\\.gemini\\antigravity\\brain\\island_telemetry.json",
+    void Initialize(const std::wstring& primaryFilePath = L"",
                     const std::wstring& brainScanDir = L"C:\\Users\\ASUS\\.gemini\\antigravity\\brain",
                     HWND notifyHwnd = nullptr) {
         Shutdown();
@@ -1385,7 +1385,7 @@ public:
         checkInterval_ = seconds;
     }
 
-    // Zero CPU File Watcher: Fast non-blocking atomic check on render thread
+    // Zero CPU File Watcher & Active Window Focus Tracker
     bool CheckForUpdates(double /*nowSec*/ = 0.0, bool force = false) {
         if (force) {
             std::lock_guard<std::mutex> lock(stateMutex_);
@@ -1395,6 +1395,13 @@ public:
             }
             return changed;
         }
+
+        // Active Foreground Window Synchronization (O(1) Win32 check, zero disk I/O)
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            UpdateForegroundWindowSessionLocked();
+        }
+
         // Non-blocking check for render thread (zero disk I/O)
         bool expected = true;
         return hasUpdates_.compare_exchange_strong(expected, false);
@@ -1779,10 +1786,10 @@ public:
         const float gap = 8.0f * scale;
 
         // --------------------------------------------------------------------
-        // ZONE B: Context Window & Compaction Bar (HERO FEATURE - ON TOP)
+        // ZONE B: Context Window & Compaction Bar (HERO FEATURE - PROMINENT)
         // --------------------------------------------------------------------
         const float ctxTop = headerBottom + gap;
-        const float ctxHeight = 28.0f * scale;
+        const float ctxHeight = 44.0f * scale; // Prominent Hero Height
         const float ctxBottom = ctxTop + ctxHeight;
         const D2D1_RECT_F contextRect = D2D1::RectF(rect.left + padX, ctxTop, rect.right - padX, ctxBottom);
 
@@ -1791,13 +1798,13 @@ public:
         const uint64_t curTokens = session ? session->contextTokens : 0;
         const uint64_t maxTokens = session ? session->maxTokens : 1048576;
         const float ratio = session ? session->GetRatio() : 0.0f;
-        const float threshold = session ? session->compactionThresholdFraction : 0.80f;
-        const bool isCompactionWarn = session ? session->IsCompactionWarning() : (ratio >= 0.80f);
+        const float threshold = session ? session->compactionThresholdFraction : 0.21f; // 21%
+        const bool isCompactionWarn = session ? session->IsCompactionWarning() : (ratio >= 0.21f);
 
-        // B1. Context Labels
+        // B1. Context Labels (Upper Row)
         if (microFormat) {
-            D2D1_RECT_F ctxLblRect = D2D1::RectF(contextRect.left + 9.0f * scale, contextRect.top + 3.0f * scale,
-                                                contextRect.left + 120.0f * scale, contextRect.top + 15.0f * scale);
+            D2D1_RECT_F ctxLblRect = D2D1::RectF(contextRect.left + 12.0f * scale, contextRect.top + 7.0f * scale,
+                                                contextRect.left + 140.0f * scale, contextRect.top + 21.0f * scale);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             target->DrawText(L"CONTEXT TOKENS", 14, microFormat, ctxLblRect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
@@ -1807,24 +1814,25 @@ public:
                        FormatTokenCount(curTokens).c_str(), FormatTokenCount(maxTokens).c_str(),
                        ratio * 100.0f, threshold * 100.0f);
 
-            D2D1_RECT_F ctxValRect = D2D1::RectF(contextRect.left + 120.0f * scale, contextRect.top + 3.0f * scale,
-                                                contextRect.right - 9.0f * scale, contextRect.top + 15.0f * scale);
+            D2D1_RECT_F ctxValRect = D2D1::RectF(contextRect.left + 140.0f * scale, contextRect.top + 7.0f * scale,
+                                                contextRect.right - 12.0f * scale, contextRect.top + 21.0f * scale);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
             ID2D1Brush* valBrush = (ratio >= 0.90f) ? redBrush.Get()
-                : (isCompactionWarn ? amberBrush.Get() : textMutedBrush.Get());
+                : (isCompactionWarn ? amberBrush.Get() : textWhiteBrush.Get());
             target->DrawText(ctxValBuf, static_cast<UINT32>(wcslen(ctxValBuf)), microFormat,
                              ctxValRect, valBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
-        // B2. Progress Bar Track & 80% Threshold Hairline
-        const float barLeft = contextRect.left + 9.0f * scale;
-        const float barRight = contextRect.right - 9.0f * scale;
+        // B2. Prominent Progress Bar Track & 21% Threshold Hairline (Lower Row)
+        const float barLeft = contextRect.left + 12.0f * scale;
+        const float barRight = contextRect.right - 12.0f * scale;
         const float barWidth = barRight - barLeft;
-        const float barTop = contextRect.top + 17.0f * scale;
-        const float barBottom = barTop + 5.0f * scale;
-        const float barRadius = 2.5f * scale;
+        const float barTop = contextRect.top + 25.0f * scale;
+        const float barHeight = 8.0f * scale; // Prominent 8px track height
+        const float barBottom = barTop + barHeight;
+        const float barRadius = 4.0f * scale;
 
         const D2D1_RECT_F trackRect = D2D1::RectF(barLeft, barTop, barRight, barBottom);
         target->FillRoundedRectangle(D2D1::RoundedRect(trackRect, barRadius, barRadius), trackBgBrush.Get());
@@ -1837,35 +1845,31 @@ public:
             target->FillRoundedRectangle(D2D1::RoundedRect(fillRect, barRadius, barRadius), fillBrush);
         }
 
-        // 80% Threshold Hairline Indicator
-        const float thresholdX = barLeft + barWidth * std::clamp(threshold, 0.1f, 1.0f);
+        // 21% Threshold Hairline Indicator
+        const float thresholdX = barLeft + barWidth * std::clamp(threshold, 0.05f, 1.0f);
         target->DrawLine(
-            D2D1::Point2F(thresholdX, barTop - 2.0f * scale),
-            D2D1::Point2F(thresholdX, barBottom + 2.0f * scale),
+            D2D1::Point2F(thresholdX, barTop - 2.5f * scale),
+            D2D1::Point2F(thresholdX, barBottom + 2.5f * scale),
             redBrush.Get(),
             1.5f * scale
         );
 
         // --------------------------------------------------------------------
-        // ZONE C: Dual Real Metrics Bento Cards (ACTIVE TIME & ACTIVE EXECUTION)
+        // ZONE C: Full-Width ACTIVE TIME Bento Card (Hero Metric)
         // --------------------------------------------------------------------
-        const float cardsTop = ctxBottom + gap;
-        const float cardsHeight = 54.0f * scale;
-        const float cardsBottom = cardsTop + cardsHeight;
-        const float cardsTotalWidth = (rect.right - rect.left) - padX * 2.0f;
-        const float colGap = 8.0f * scale;
-        const float cardWidth = (cardsTotalWidth - colGap) * 0.5f;
+        const float cardTop = ctxBottom + gap;
+        const float cardHeight = 40.0f * scale;
+        const float cardBottom = cardTop + cardHeight;
+        const D2D1_RECT_F activeTimeRect = D2D1::RectF(rect.left + padX, cardTop, rect.right - padX, cardBottom);
 
-        // C1. ACTIVE TIME Card (Left)
-        const D2D1_RECT_F activeTimeRect = D2D1::RectF(rect.left + padX, cardsTop, rect.left + padX + cardWidth, cardsBottom);
         DrawCard(target, activeTimeRect, 8.0f * scale, bentoBgBrush.Get(), bentoBorderBrush.Get());
 
         const uint64_t durationSec = session ? session->GetDurationSeconds() : 0;
         const uint64_t ageSec = session ? session->GetAgeSeconds() : 0;
         const float timingFraction = std::clamp(static_cast<float>((durationSec % 3600)) / 3600.0f, 0.05f, 1.0f);
         const D2D1_POINT_2F ring1Center = D2D1::Point2F(activeTimeRect.left + 22.0f * scale, (activeTimeRect.top + activeTimeRect.bottom) * 0.5f);
-        const float ringRadius = 14.0f * scale;
-        const float strokeW = 2.6f * scale;
+        const float ringRadius = 11.0f * scale;
+        const float strokeW = 2.4f * scale;
 
         DrawCircularProgressRing(target, factory.Get(), ring1Center, ringRadius, strokeW,
                                  timingFraction, cyanBrush.Get(), trackBgBrush.Get());
@@ -1884,15 +1888,15 @@ public:
 
         const float text1Left = ring1Center.x + 18.0f * scale;
         if (microFormat && textMutedBrush && textWhiteBrush && textTertiaryBrush) {
-            // Label
-            D2D1_RECT_F lbl1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 6.0f * scale, activeTimeRect.right - 6.0f * scale, activeTimeRect.top + 17.0f * scale);
+            // Label on left
+            D2D1_RECT_F lbl1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 5.0f * scale, activeTimeRect.left + 150.0f * scale, activeTimeRect.top + 18.0f * scale);
             microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             target->DrawText(L"ACTIVE TIME", 11, microFormat, lbl1Rect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-            // Value
+            // Formatted active duration
             std::wstring val1 = FormatActiveTime(durationSec);
-            D2D1_RECT_F val1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 17.0f * scale, activeTimeRect.right - 6.0f * scale, activeTimeRect.top + 33.0f * scale);
+            D2D1_RECT_F val1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 18.0f * scale, activeTimeRect.left + 150.0f * scale, activeTimeRect.bottom - 4.0f * scale);
             IDWriteTextFormat* boldFmt = boldTextFormat ? boldTextFormat : smallTextFormat;
             if (boldFmt) {
                 boldFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -1901,79 +1905,19 @@ public:
                 boldFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             }
 
-            // Subtitle
+            // Right side status / update timestamp
             std::wstring sub1 = FormatUpdatedAgo(ageSec);
-            D2D1_RECT_F sub1Rect = D2D1::RectF(text1Left, activeTimeRect.top + 34.0f * scale, activeTimeRect.right - 6.0f * scale, activeTimeRect.bottom - 5.0f * scale);
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            D2D1_RECT_F sub1Rect = D2D1::RectF(activeTimeRect.right - 130.0f * scale, activeTimeRect.top, activeTimeRect.right - 12.0f * scale, activeTimeRect.bottom);
+            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
             microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             ID2D1Brush* sub1Brush = (sub1 == L"Active") ? greenBrush.Get() : textTertiaryBrush.Get();
             target->DrawText(sub1.c_str(), static_cast<UINT32>(sub1.size()), microFormat, sub1Rect, sub1Brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
-
-        // C2. ACTIVE EXECUTION Card (Right) - Replacing redundant Step Card
-        const D2D1_RECT_F actionsRect = D2D1::RectF(activeTimeRect.right + colGap, cardsTop, rect.right - padX, cardsBottom);
-        DrawCard(target, actionsRect, 8.0f * scale, bentoBgBrush.Get(), bentoBorderBrush.Get());
-
-        const size_t runningSubagents = session ? session->GetRunningSubagentsCount() : 0;
-        const bool isExecuting = session && (session->isModelActive || runningSubagents > 0 || session->GetRunningTasksCount() > 0);
-        const D2D1_POINT_2F ring2Center = D2D1::Point2F(actionsRect.left + 22.0f * scale, (actionsRect.top + actionsRect.bottom) * 0.5f);
-
-        ID2D1SolidColorBrush* ring2Brush = isExecuting ? greenBrush.Get() : cyanBrush.Get();
-        float ring2Fraction = isExecuting ? 1.0f : 0.70f;
-
-        DrawCircularProgressRing(target, factory.Get(), ring2Center, ringRadius, strokeW,
-                                 ring2Fraction, ring2Brush, trackBgBrush.Get());
-
-        std::wstring ring2Text = (runningSubagents > 0) ? std::to_wstring(runningSubagents) : (isExecuting ? L"\u25B6" : L"\u2726");
-        if (microFormat && textWhiteBrush) {
-            D2D1_RECT_F pct2Rect = D2D1::RectF(ring2Center.x - ringRadius, ring2Center.y - ringRadius,
-                                               ring2Center.x + ringRadius, ring2Center.y + ringRadius);
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            ID2D1Brush* ring2TextBrush = isExecuting ? greenBrush.Get() : textWhiteBrush.Get();
-            target->DrawText(ring2Text.c_str(), static_cast<UINT32>(ring2Text.size()), microFormat,
-                             pct2Rect, ring2TextBrush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
-
-        const float text2Left = ring2Center.x + 18.0f * scale;
-        if (microFormat && textMutedBrush && textWhiteBrush && textTertiaryBrush) {
-            // Label / Tag
-            D2D1_RECT_F lbl2Rect = D2D1::RectF(text2Left, actionsRect.top + 6.0f * scale, actionsRect.right - 6.0f * scale, actionsRect.top + 17.0f * scale);
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            target->DrawText(L"ACTIVE EXECUTION", 16, microFormat, lbl2Rect, textMutedBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-            // Subagent Role
-            std::wstring roleVal = (session && !session->activeSubagentRole.empty())
-                ? session->activeSubagentRole
-                : ((runningSubagents > 0) ? (std::to_wstring(runningSubagents) + L" Subagents") : L"Main Agent");
-            D2D1_RECT_F val2Rect = D2D1::RectF(text2Left, actionsRect.top + 17.0f * scale, actionsRect.right - 6.0f * scale, actionsRect.top + 33.0f * scale);
-            if (roleFormat) {
-                roleFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                roleFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                target->DrawText(roleVal.c_str(), static_cast<UINT32>(roleVal.size()), roleFormat, val2Rect, textWhiteBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            }
-
-            // Current Tool Action & Status Subtitle
-            std::wstring statusVal = (session && !session->currentExecutionStatus.empty())
-                ? session->currentExecutionStatus
-                : (isExecuting ? L"Executing" : L"Ready");
-            std::wstring actionVal = (session && !session->currentToolAction.empty())
-                ? session->currentToolAction
-                : (isExecuting ? L"Working on step" : L"Idle");
-
-            std::wstring sub2 = statusVal + L" \u2022 " + actionVal;
-            D2D1_RECT_F sub2Rect = D2D1::RectF(text2Left, actionsRect.top + 34.0f * scale, actionsRect.right - 6.0f * scale, actionsRect.bottom - 5.0f * scale);
-            microFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            microFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            ID2D1Brush* sub2Brush = isExecuting ? greenBrush.Get() : textTertiaryBrush.Get();
-            target->DrawText(sub2.c_str(), static_cast<UINT32>(sub2.size()), microFormat, sub2Rect, sub2Brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
     }
 
-    // Dynamic container height clamping: padY(12) + header(30) + gap(8) + ctx(28) + gap(8) + cards(54) + padY(12) = 152
+    // Dynamic container height clamping: padY(12) + header(30) + gap(8) + ctxHero(44) + gap(8) + activeTime(40) + padY(12) = 154
     float GetExpandedHeight(float scale = 1.0f) const {
-        return 152.0f * scale;
+        return 154.0f * scale;
     }
 
 private:
@@ -2165,6 +2109,38 @@ private:
             hasActiveSessionSnapshot_ = true;
         }
         sessionsSnapshot_ = sessions_;
+    }
+
+    void UpdateForegroundWindowSessionLocked() {
+        if (!autoFollowMru_ || sessions_.size() < 2) return;
+        HWND fgHwnd = GetForegroundWindow();
+        if (!fgHwnd) return;
+        wchar_t fgTitle[512] = {};
+        int titleLen = GetWindowTextW(fgHwnd, fgTitle, 512);
+        if (titleLen <= 0) return;
+
+        for (size_t i = 0; i < sessions_.size(); ++i) {
+            const auto& s = sessions_[i];
+            bool matches = false;
+            if (!s.projectDirectoryName.empty() && s.projectDirectoryName != L"Workspace" && s.projectDirectoryName != L"Antigravity") {
+                if (wcsstr(fgTitle, s.projectDirectoryName.c_str()) != nullptr) {
+                    matches = true;
+                }
+            }
+            if (!matches && !s.conversationTitle.empty() && s.conversationTitle.size() >= 4 && s.conversationTitle != L"Active Conversation") {
+                if (wcsstr(fgTitle, s.conversationTitle.c_str()) != nullptr) {
+                    matches = true;
+                }
+            }
+            if (matches) {
+                if (selectedSessionIndex_ != i) {
+                    selectedSessionIndex_ = i;
+                    UpdateActiveSnapshotLocked();
+                    hasUpdates_.store(true);
+                }
+                break;
+            }
+        }
     }
 
     // Ingests a JSON snapshot string into the multi-session resolver
@@ -2460,17 +2436,18 @@ private:
                    t.rfind(L"Task \"", 0) == 0;
         };
 
-        // Try querying title & project directory from Antigravity's conversation_summaries.db
-        if (isBadTitle(telem.conversationTitle)) {
-            std::wstring dbTitle, dbProject;
-            if (QueryConversationMetaFromDb(telem.activeConversationId, dbTitle, dbProject)) {
-                if (!dbTitle.empty()) telem.conversationTitle = dbTitle;
-                if (!dbProject.empty() && (telem.projectDirectoryName.empty() || telem.projectDirectoryName == L"antigravity-handoff")) {
-                    telem.projectDirectoryName = dbProject;
-                }
+        // 1. Always query title & project directory from Antigravity's conversation_summaries.db first
+        std::wstring dbTitle, dbProject;
+        if (QueryConversationMetaFromDb(telem.activeConversationId, dbTitle, dbProject)) {
+            if (!dbTitle.empty() && !isBadTitle(dbTitle)) {
+                telem.conversationTitle = dbTitle;
+            }
+            if (!dbProject.empty() && dbProject != L"antigravity-handoff" && dbProject.find(L".gemini") == std::wstring::npos) {
+                telem.projectDirectoryName = dbProject;
             }
         }
 
+        // 2. Fallbacks if database had empty entries
         if (isBadTitle(telem.conversationTitle)) {
             if (!telem.sessionName.empty() && !IsUuidString(telem.sessionName)) {
                 telem.conversationTitle = telem.sessionName;
@@ -2488,10 +2465,10 @@ private:
             }
         }
         if (isBadTitle(telem.conversationTitle)) {
-            telem.conversationTitle = L"Resume Antigravity Handoff";
+            telem.conversationTitle = L"Active Conversation";
         }
         if (telem.projectDirectoryName.empty() || telem.projectDirectoryName == L"antigravity-handoff") {
-            telem.projectDirectoryName = L"Personal Windhawk Mods";
+            telem.projectDirectoryName = L"Workspace";
         }
 
         size_t pPos = 0;
@@ -2576,11 +2553,6 @@ private:
         }
 
         // Pass 2: Pick top root conversations (skipping subagents)
-        std::wstring directPrimary = brainScanDir_ + L"\\island_telemetry.json";
-        if (std::find(outPaths.begin(), outPaths.end(), directPrimary) == outPaths.end()) {
-            if (FileExists(directPrimary)) outPaths.push_back(directPrimary);
-        }
-
         int collectedRoots = 0;
         for (const auto& entry : folderEntries) {
             if (knownSubagentIds_.find(entry.name) != knownSubagentIds_.end()) {

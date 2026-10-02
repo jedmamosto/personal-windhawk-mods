@@ -3622,10 +3622,21 @@ inline DWORD WINAPI RenderThreadProc(void*) {
         float satTargetHeight = 0.0f;
         if (agyActive && !isFullscreen && !g_manuallyHidden.load()) {
             if (satExpanded) {
+                // Expanded Dashboard Mode: full multi-session bento card
                 satTargetWidth = 380.0f * g_settings.sizeScale;
                 satTargetHeight = g_agyTelemetry.GetExpandedHeight(g_settings.sizeScale);
             } else {
-                satTargetWidth = 46.0f * g_settings.sizeScale;
+                const agy::SessionTelemetry* activeSession = g_agyTelemetry.GetActiveSession();
+                const bool isWorking = activeSession && (activeSession->isModelActive ||
+                                                         activeSession->GetRunningSubagentsCount() > 0 ||
+                                                         activeSession->GetRunningTasksCount() > 0);
+                if (isWorking || satHover) {
+                    // Normal Notch Mode: glanceable standard pill with orb, glint, and turn/step text
+                    satTargetWidth = 148.0f * g_settings.sizeScale;
+                } else {
+                    // Minimized Notch Mode: compact notch pill with clean solid fill and zero halo bleed
+                    satTargetWidth = 46.0f * g_settings.sizeScale;
+                }
                 satTargetHeight = primary.height > 1.0f ? primary.height : (36.0f * g_settings.sizeScale);
             }
         }

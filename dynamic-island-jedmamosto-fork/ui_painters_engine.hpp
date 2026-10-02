@@ -3792,6 +3792,8 @@ class Renderer {
         float radius = (rect.bottom - rect.top) * 0.5f;
         if (expanded) {
             radius = 18.0f * settings.sizeScale;
+        } else if (settings.notchStyle) {
+            radius = 16.0f * settings.sizeScale;
         } else {
             radius = (rect.bottom - rect.top) * 0.5f;
         }
@@ -3856,44 +3858,72 @@ class Renderer {
                 orbCenter = D2D1::Point2F((rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f);
             }
 
-            // 1. Ambient Glow Halo Ring (dynamic status accent aura)
-            const float haloRadius = 8.5f * settings.sizeScale;
-            const float haloStroke = 1.6f * settings.sizeScale;
-            ComPtr<ID2D1SolidColorBrush> haloBrush;
-            if (SUCCEEDED(target_->CreateSolidColorBrush(
-                    D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.22f * pulse), &haloBrush))) {
-                target_->DrawEllipse(D2D1::Ellipse(orbCenter, haloRadius, haloRadius), haloBrush.Get(), haloStroke);
-            }
+            const float haloRadius = std::min(8.5f * settings.sizeScale, pillRadius - 1.5f);
 
-            // 2. Active Status Orb Core with Specular Glint
-            ComPtr<ID2D1SolidColorBrush> orbBrush;
-            if (SUCCEEDED(target_->CreateSolidColorBrush(
-                    D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.92f), &orbBrush))) {
-                const float coreRadius = 3.8f * settings.sizeScale;
-                target_->FillEllipse(D2D1::Ellipse(orbCenter, coreRadius, coreRadius), orbBrush.Get());
-            }
+            if (!showText) {
+                // Minimized Notch Mode:
+                // Clean solid fill without outer halo rings or overlapping strokes.
+                // Strictly clipped to capsule/notch shape bounds to eliminate any graphical bleed or overlap.
+                ComPtr<ID2D1Geometry> clipGeom = CreateIslandMaskGeometry(rect, radius, settings.notchStyle);
+                ComPtr<ID2D1Layer> clipLayer;
+                if (clipGeom && SUCCEEDED(target_->CreateLayer(nullptr, &clipLayer))) {
+                    target_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), clipGeom.Get()), clipLayer.Get());
+                } else {
+                    target_->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                }
 
-            ComPtr<ID2D1SolidColorBrush> glintBrush;
-            if (SUCCEEDED(target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.65f), &glintBrush))) {
-                const float glintR = 1.1f * settings.sizeScale;
-                target_->FillEllipse(D2D1::Ellipse(
-                    D2D1::Point2F(orbCenter.x - 1.0f * settings.sizeScale, orbCenter.y - 1.0f * settings.sizeScale),
-                    glintR, glintR), glintBrush.Get());
-            }
+                ComPtr<ID2D1SolidColorBrush> fillBrush;
+                if (SUCCEEDED(target_->CreateSolidColorBrush(
+                        D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.95f), &fillBrush))) {
+                    const float coreRadius = std::min(4.0f * settings.sizeScale, pillRadius - 2.5f);
+                    target_->FillEllipse(D2D1::Ellipse(orbCenter, coreRadius, coreRadius), fillBrush.Get());
+                }
 
-            // 3. Subtle Status Halo Contour Stroke
-            ComPtr<ID2D1SolidColorBrush> statusBorderBrush;
-            if (SUCCEEDED(target_->CreateSolidColorBrush(
-                    D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.35f * pulse), &statusBorderBrush))) {
-                const float strokeW = 1.0f * settings.sizeScale;
-                const float halfStroke = strokeW * 0.5f;
-                D2D1_RECT_F borderRect = D2D1::RectF(
-                    rect.left + halfStroke,
-                    settings.notchStyle ? rect.top : (rect.top + halfStroke),
-                    rect.right - halfStroke,
-                    rect.bottom - halfStroke
-                );
-                DrawIslandShape(borderRect, radius, settings.w11Style, settings.notchStyle, statusBorderBrush.Get(), strokeW);
+                if (clipLayer) {
+                    target_->PopLayer();
+                } else {
+                    target_->PopAxisAlignedClip();
+                }
+            } else {
+                // Normal Notch Mode:
+                // Retains the status orb core, specular glint, and ambient aura halo.
+                const float haloStroke = 1.6f * settings.sizeScale;
+                ComPtr<ID2D1SolidColorBrush> haloBrush;
+                if (SUCCEEDED(target_->CreateSolidColorBrush(
+                        D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.22f * pulse), &haloBrush))) {
+                    target_->DrawEllipse(D2D1::Ellipse(orbCenter, haloRadius, haloRadius), haloBrush.Get(), haloStroke);
+                }
+
+                // Active Status Orb Core with Specular Glint
+                ComPtr<ID2D1SolidColorBrush> orbBrush;
+                if (SUCCEEDED(target_->CreateSolidColorBrush(
+                        D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.92f), &orbBrush))) {
+                    const float coreRadius = 3.8f * settings.sizeScale;
+                    target_->FillEllipse(D2D1::Ellipse(orbCenter, coreRadius, coreRadius), orbBrush.Get());
+                }
+
+                ComPtr<ID2D1SolidColorBrush> glintBrush;
+                if (SUCCEEDED(target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.65f), &glintBrush))) {
+                    const float glintR = 1.1f * settings.sizeScale;
+                    target_->FillEllipse(D2D1::Ellipse(
+                        D2D1::Point2F(orbCenter.x - 1.0f * settings.sizeScale, orbCenter.y - 1.0f * settings.sizeScale),
+                        glintR, glintR), glintBrush.Get());
+                }
+
+                // Subtle Status Halo Contour Stroke
+                ComPtr<ID2D1SolidColorBrush> statusBorderBrush;
+                if (SUCCEEDED(target_->CreateSolidColorBrush(
+                        D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.35f * pulse), &statusBorderBrush))) {
+                    const float strokeW = 1.0f * settings.sizeScale;
+                    const float halfStroke = strokeW * 0.5f;
+                    D2D1_RECT_F borderRect = D2D1::RectF(
+                        rect.left + halfStroke,
+                        settings.notchStyle ? rect.top : (rect.top + halfStroke),
+                        rect.right - halfStroke,
+                        rect.bottom - halfStroke
+                    );
+                    DrawIslandShape(borderRect, radius, settings.w11Style, settings.notchStyle, statusBorderBrush.Get(), strokeW);
+                }
             }
 
             // 4. Optional Turn / Step / Action Label (Extended Pill Mode)
@@ -3926,6 +3956,7 @@ class Renderer {
                     target_->DrawTextW(label.c_str(), static_cast<UINT32>(label.size()),
                                        smallTextFormat_.Get(), textRect, textBrush.Get(),
                                        D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
                 }
             }
         }

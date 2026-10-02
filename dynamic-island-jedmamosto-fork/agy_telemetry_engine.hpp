@@ -383,6 +383,8 @@ struct Workspace {
 
 // A session with running subagents/tasks without an update for > 3 minutes is considered stalled/abandoned
 constexpr uint64_t kRunningStaleThresholdSec = 180; // 3 minutes
+// Satellite auto-dismissal threshold: exactly 2 minutes of continuous inactivity
+constexpr uint64_t kSatelliteInactivityTimeoutSec = 120; // 2 minutes (120 seconds)
 // A session without any updates for > 15 minutes is considered dormant
 constexpr uint64_t kSessionDormantThresholdSec = 900; // 15 minutes
 // An inactive session older than 1 hour is pruned if newer sessions exist
@@ -523,6 +525,8 @@ struct SessionTelemetry {
     }
 };
 
+inline bool IsUuidString(std::wstring_view s);
+
 inline bool ParseSessionJson(const std::string& jsonStr, SessionTelemetry& outTelemetry) {
     json::Value root;
     if (!json::Parse(jsonStr, root) || !root.IsObject()) {
@@ -532,15 +536,26 @@ inline bool ParseSessionJson(const std::string& jsonStr, SessionTelemetry& outTe
     outTelemetry.activeConversationId = root["activeConversationId"].AsWString();
     outTelemetry.sessionName = root["sessionName"].AsWString();
 
-    // 1. conversationTitle with fallback to sessionName or activeConversationId
+    // 1. conversationTitle (Never fall back to raw UUIDs or task IDs)
     if (root.HasKey("conversationTitle") && !root["conversationTitle"].AsWString().empty()) {
-        outTelemetry.conversationTitle = root["conversationTitle"].AsWString();
+        std::wstring t = root["conversationTitle"].AsWString();
+        if (!IsUuidString(t) && t.rfind(L"Task id", 0) != 0 && t.rfind(L"task-", 0) != 0) {
+            outTelemetry.conversationTitle = t;
+        }
     } else if (root.HasKey("title") && !root["title"].AsWString().empty()) {
-        outTelemetry.conversationTitle = root["title"].AsWString();
-    } else if (!outTelemetry.sessionName.empty()) {
+        std::wstring t = root["title"].AsWString();
+        if (!IsUuidString(t) && t.rfind(L"Task id", 0) != 0 && t.rfind(L"task-", 0) != 0) {
+            outTelemetry.conversationTitle = t;
+        }
+    } else if (!outTelemetry.sessionName.empty() && !IsUuidString(outTelemetry.sessionName)) {
         outTelemetry.conversationTitle = outTelemetry.sessionName;
-    } else {
-        outTelemetry.conversationTitle = outTelemetry.activeConversationId;
+    }
+
+    if (root.HasKey("projectDirectoryName") && !root["projectDirectoryName"].AsWString().empty()) {
+        std::wstring p = root["projectDirectoryName"].AsWString();
+        if (p != L"antigravity-handoff" && p.find(L".gemini") == std::wstring::npos) {
+            outTelemetry.projectDirectoryName = p;
+        }
     }
 
     outTelemetry.contextTokens = root["contextTokens"].AsUInt64(0);
@@ -969,6 +984,98 @@ inline uint64_t ParseIsoTimestamp(std::string_view isoStr) {
     return 0;
 }
 
+// Queries human-readable conversation title, workspace project folder, and root conversation ID from Antigravity's conversation_summaries.db
+inline bool QueryConversationMetaFromDb(const std::wstring& convId, std::wstring& outTitle, std::wstring& outProjectDir, std::wstring* outRootConvId = nullptr) {
+    if (convId.empty()) return false;
+
+    HMODULE hSqlite = LoadLibraryW(L"winsqlite3.dll");
+    if (!hSqlite) return false;
+
+    typedef int (*sqlite3_open_v2_t)(const char *filename, void **ppDb, int flags, const char *zVfs);
+    typedef int (*sqlite3_prepare_v2_t)(void *db, const char *zSql, int nByte, void **ppStmt, const char **pzTail);
+    typedef int (*sqlite3_step_t)(void *pStmt);
+    typedef const unsigned char *(*sqlite3_column_text_t)(void *pStmt, int iCol);
+    typedef int (*sqlite3_finalize_t)(void *pStmt);
+    typedef int (*sqlite3_close_t)(void *db);
+
+    auto pOpen = reinterpret_cast<sqlite3_open_v2_t>(GetProcAddress(hSqlite, "sqlite3_open_v2"));
+    auto pPrep = reinterpret_cast<sqlite3_prepare_v2_t>(GetProcAddress(hSqlite, "sqlite3_prepare_v2"));
+    auto pStep = reinterpret_cast<sqlite3_step_t>(GetProcAddress(hSqlite, "sqlite3_step"));
+    auto pColText = reinterpret_cast<sqlite3_column_text_t>(GetProcAddress(hSqlite, "sqlite3_column_text"));
+    auto pFin = reinterpret_cast<sqlite3_finalize_t>(GetProcAddress(hSqlite, "sqlite3_finalize"));
+    auto pClose = reinterpret_cast<sqlite3_close_t>(GetProcAddress(hSqlite, "sqlite3_close"));
+
+    if (!pOpen || !pPrep || !pStep || !pColText || !pFin || !pClose) {
+        FreeLibrary(hSqlite);
+        return false;
+    }
+
+    std::string dbPath = "C:\\Users\\ASUS\\.gemini\\antigravity\\conversation_summaries.db";
+    void* db = nullptr;
+    if (pOpen(dbPath.c_str(), &db, 1 /* SQLITE_OPEN_READONLY */, nullptr) != 0 || !db) {
+        FreeLibrary(hSqlite);
+        return false;
+    }
+
+    std::string curId = WideToUtf8(convId);
+    std::string rootId = curId;
+    bool found = false;
+
+    // Follow parent_conversation_id chain up to 5 levels to find root title, workspace, and root ID
+    for (int depth = 0; depth < 5 && !curId.empty(); ++depth) {
+        std::string sql = "SELECT title, workspace_uris, parent_conversation_id FROM conversation_summaries WHERE conversation_id = '" + curId + "' LIMIT 1;";
+        void* stmt = nullptr;
+        if (pPrep(db, sql.c_str(), -1, &stmt, nullptr) == 0 && stmt) {
+            if (pStep(stmt) == 100 /* SQLITE_ROW */) {
+                const char* titleText = reinterpret_cast<const char*>(pColText(stmt, 0));
+                const char* wsText = reinterpret_cast<const char*>(pColText(stmt, 1));
+                const char* parentText = reinterpret_cast<const char*>(pColText(stmt, 2));
+
+                if (titleText && titleText[0] != '\0') {
+                    outTitle = Utf8ToWide(titleText);
+                }
+                if (wsText && wsText[0] != '\0') {
+                    std::string wsStr = wsText;
+                    size_t p = 0;
+                    while ((p = wsStr.find("%20", p)) != std::string::npos) {
+                        wsStr.replace(p, 3, " ");
+                        p += 1;
+                    }
+                    std::wstring wideWs = Utf8ToWide(wsStr);
+                    std::wstring dName = ExtractDirectoryName(wideWs);
+                    while (!dName.empty() && (dName.back() == L'"' || dName.back() == L']')) {
+                        dName.pop_back();
+                    }
+                    while (!dName.empty() && (dName.front() == L'"' || dName.front() == L'[')) {
+                        dName.erase(dName.begin());
+                    }
+                    if (!dName.empty() && dName.find(L".gemini") == std::wstring::npos && dName.find(L"skills") == std::wstring::npos) {
+                        outProjectDir = dName;
+                    }
+                }
+
+                rootId = curId;
+                curId = (parentText && parentText[0] != '\0') ? parentText : "";
+                found = true;
+            } else {
+                curId = "";
+            }
+            pFin(stmt);
+        } else {
+            break;
+        }
+        if (!outTitle.empty() && !outProjectDir.empty() && !outRootConvId && curId.empty()) break;
+    }
+
+    if (outRootConvId && !rootId.empty()) {
+        *outRootConvId = Utf8ToWide(rootId);
+    }
+
+    pClose(db);
+    FreeLibrary(hSqlite);
+    return found;
+}
+
 // Bounded streaming / tail reader for Antigravity transcript JSONL logs.
 // Invariant: Enforces strict 64KB bounded heap memory to prevent host process RAM spikes.
 inline bool EnrichSessionFromTranscript(const std::wstring& transcriptPath, SessionTelemetry& telem) {
@@ -1041,6 +1148,27 @@ inline bool EnrichSessionFromTranscript(const std::wstring& transcriptPath, Sess
         std::string source = root["source"].AsString();
         std::string status = root["status"].AsString();
 
+        // Extract user prompt for conversation title if not yet set
+        if (type == "USER_INPUT" && (telem.conversationTitle.empty() || IsUuidString(telem.conversationTitle))) {
+            std::string content = root["content"].AsString();
+            size_t reqStart = content.find("<USER_REQUEST>");
+            if (reqStart != std::string::npos) {
+                reqStart += 14;
+                size_t reqEnd = content.find("</USER_REQUEST>", reqStart);
+                if (reqEnd != std::string::npos) {
+                    std::string userReq = content.substr(reqStart, reqEnd - reqStart);
+                    while (!userReq.empty() && (userReq.front() == ' ' || userReq.front() == '\r' || userReq.front() == '\n')) userReq.erase(userReq.begin());
+                    while (!userReq.empty() && (userReq.back() == ' ' || userReq.back() == '\r' || userReq.back() == '\n')) userReq.pop_back();
+                    if (!userReq.empty()) {
+                        size_t firstNl = userReq.find_first_of("\r\n");
+                        if (firstNl != std::string::npos) userReq = userReq.substr(0, firstNl);
+                        if (userReq.size() > 60) userReq = userReq.substr(0, 57) + "...";
+                        telem.conversationTitle = Utf8ToWide(userReq);
+                    }
+                }
+            }
+        }
+
         if (type == "USER_INPUT" || type == "SYSTEM_MESSAGE" || (type == "GENERIC" && source == "MODEL" && status == "DONE")) {
             lastInputEpoch = ep;
         } else if (type == "PLANNER_RESPONSE") {
@@ -1070,23 +1198,15 @@ inline bool EnrichSessionFromTranscript(const std::wstring& transcriptPath, Sess
                             tSummary = tSummary.substr(1, tSummary.size() - 2);
                         }
 
-                        // Project directory inference from tool arguments if not already set
-                        if (telem.projectDirectoryName.empty() || telem.projectDirectoryName == L"Personal Windhawk Mods") {
-                            std::wstring absPath = tc["args"]["AbsolutePath"].AsWString();
-                            if (absPath.empty()) absPath = tc["args"]["TargetFile"].AsWString();
-                            if (absPath.empty()) absPath = tc["args"]["SearchDirectory"].AsWString();
-                            if (absPath.empty()) absPath = tc["args"]["Cwd"].AsWString();
-                            if (absPath.size() >= 2 && absPath.front() == L'"' && absPath.back() == L'"') {
-                                absPath = absPath.substr(1, absPath.size() - 2);
+                        // Project directory inference from tool arguments: only use Cwd and avoid .gemini or skills paths
+                        if (telem.projectDirectoryName.empty() || telem.projectDirectoryName == L"antigravity-handoff" || telem.projectDirectoryName == L"Personal Windhawk Mods") {
+                            std::wstring cwdPath = tc["args"]["Cwd"].AsWString();
+                            if (cwdPath.size() >= 2 && cwdPath.front() == L'"' && cwdPath.back() == L'"') {
+                                cwdPath = cwdPath.substr(1, cwdPath.size() - 2);
                             }
-                            if (!absPath.empty()) {
-                                size_t modPos = absPath.find(L"Personal Windhawk Mods");
-                                if (modPos != std::wstring::npos) {
-                                    telem.projectDirectoryName = L"Personal Windhawk Mods";
-                                } else {
-                                    std::wstring dName = ExtractDirectoryName(GetDirectoryFromPath(absPath));
-                                    if (!dName.empty()) telem.projectDirectoryName = dName;
-                                }
+                            if (!cwdPath.empty() && cwdPath.find(L".gemini") == std::wstring::npos) {
+                                std::wstring cName = ExtractDirectoryName(cwdPath);
+                                if (!cName.empty()) telem.projectDirectoryName = cName;
                             }
                         }
                     }
@@ -1106,11 +1226,18 @@ inline bool EnrichSessionFromTranscript(const std::wstring& transcriptPath, Sess
             telem.isModelActive = true;
             telem.currentExecutionStatus = L"Executing";
         } else if (type == "PLANNER_RESPONSE" && status == "DONE") {
-            telem.isModelActive = true;
-            telem.currentExecutionStatus = L"Running";
+            bool hasToolCalls = root.HasKey("tool_calls") && root["tool_calls"].IsArray() && root["tool_calls"].Size() > 0;
+            if (hasToolCalls) {
+                telem.isModelActive = true;
+                telem.currentExecutionStatus = L"Executing";
+            } else {
+                telem.isModelActive = false;
+                telem.currentExecutionStatus = L"Ready";
+            }
         } else if (type == "GENERIC" && status == "DONE") {
-            telem.isModelActive = false;
-            telem.currentExecutionStatus = L"Ready";
+            // Tool execution completed; model is actively receiving result and processing next step
+            telem.isModelActive = true;
+            telem.currentExecutionStatus = L"Executing";
         }
     }
 
@@ -1126,6 +1253,28 @@ inline bool EnrichSessionFromTranscript(const std::wstring& transcriptPath, Sess
     } else if (telem.cumulativeActiveTimeSec == 0 && telem.currentStep > 0) {
         telem.cumulativeActiveTimeSec = static_cast<uint64_t>(telem.currentStep * 8);
     }
+
+    // Calculate context tokens based on transcript_full.jsonl or transcript.jsonl size
+    if (telem.contextTokens == 0) {
+        std::wstring dir = GetDirectoryFromPath(transcriptPath);
+        std::wstring fullPath = dir + L"\\transcript_full.jsonl";
+        uint64_t fullBytes = 0;
+        WIN32_FILE_ATTRIBUTE_DATA fullFad = {};
+        if (GetFileAttributesExW(fullPath.c_str(), GetFileExInfoStandard, &fullFad)) {
+            fullBytes = (static_cast<uint64_t>(fullFad.nFileSizeHigh) << 32) | fullFad.nFileSizeLow;
+        } else if (fileSize.QuadPart > 0) {
+            fullBytes = static_cast<uint64_t>(fileSize.QuadPart * 1.25);
+        }
+        if (fullBytes > 0) {
+            telem.contextTokens = static_cast<uint64_t>(std::max<double>(100.0, static_cast<double>(fullBytes) / 3.8));
+        }
+    }
+    if (telem.maxTokens == 0) {
+        telem.maxTokens = 1048576; // Standard 1.0M Gemini context window
+    }
+    telem.percentUtilized = static_cast<float>(
+        (static_cast<double>(telem.contextTokens) / static_cast<double>(telem.maxTokens)) * 100.0
+    );
 
     if (latestEventEpoch > 0) {
         telem.updatedAtEpoch = latestEventEpoch;
@@ -1148,7 +1297,7 @@ inline bool EnrichSessionFromTranscript(const std::wstring& transcriptPath, Sess
             telem.activeSubagentRole = L"Main Agent";
         }
     }
-    if (telem.projectDirectoryName.empty()) {
+    if (telem.projectDirectoryName.empty() || telem.projectDirectoryName == L"antigravity-handoff") {
         telem.projectDirectoryName = L"Personal Windhawk Mods";
     }
 
@@ -1383,28 +1532,20 @@ public:
         return false;
     }
 
-    // Evaluates if telemetry is active (running subagents, running tasks, or active IDE session)
+    // Evaluates if telemetry is active: stays visible during active work and auto-dismisses after 2 minutes of continuous inactivity
     bool IsActive() const {
         std::lock_guard<std::mutex> lock(stateMutex_);
         if (sessions_.empty()) return false;
 
-        const bool isIdeRunning = IsAntigravityRunningCached();
-
         for (const auto& s : sessions_) {
-            uint64_t age = s.GetAgeSeconds();
-
-            // Active if running subagents or tasks or model actively generating (<= 3 mins)
+            // Active work: running subagents or tasks or active model inference -> ALWAYS active
             if (s.isModelActive || s.GetRunningSubagentsCount() > 0 || s.GetRunningTasksCount() > 0) {
                 return true;
             }
 
-            // Active if session was updated recently within 15 minutes
-            if (age < kSessionDormantThresholdSec) {
-                return true;
-            }
-
-            // If Antigravity IDE is actively running, retain recent session (up to 45 minutes)
-            if (isIdeRunning && age < (45 * 60)) {
+            // Inactivity lifecycle: stays visible for up to 2 minutes (120s) of continuous inactivity after completion
+            uint64_t age = s.GetAgeSeconds();
+            if (age < kSatelliteInactivityTimeoutSec) {
                 return true;
             }
         }
@@ -1566,7 +1707,7 @@ public:
 
         std::wstring convTitle = (session && !session->conversationTitle.empty())
             ? session->conversationTitle
-            : L"Feature Intent: Dynamic Island AGY Polish & Telemetry";
+            : L"Resume Antigravity Handoff";
 
         if (microFormat && textMutedBrush) {
             D2D1_RECT_F projRect = D2D1::RectF(headerTextLeft, headerTop, headerTextRight, headerTop + 13.0f * scale);
@@ -1900,7 +2041,7 @@ private:
     }
 
     static void MergeSessionTelemetry(SessionTelemetry& dst, const SessionTelemetry& src) {
-        if (dst.contextTokens == 0 && src.contextTokens > 0) {
+        if (src.contextTokens > 0) {
             dst.contextTokens = src.contextTokens;
             dst.maxTokens = src.maxTokens;
             dst.percentUtilized = src.percentUtilized;
@@ -1916,13 +2057,25 @@ private:
         if (dst.workspace.folder.empty() && !src.workspace.folder.empty()) {
             dst.workspace = src.workspace;
         }
-        if (dst.projectDirectoryName.empty() || dst.projectDirectoryName == L"Personal Windhawk Mods") {
-            if (!src.projectDirectoryName.empty()) dst.projectDirectoryName = src.projectDirectoryName;
+        auto isBadProject = [](const std::wstring& p) {
+            return p.empty() || p == L"antigravity-handoff" || p.find(L".gemini") != std::wstring::npos || p.find(L"skills") != std::wstring::npos;
+        };
+        if (isBadProject(dst.projectDirectoryName) && !isBadProject(src.projectDirectoryName)) {
+            dst.projectDirectoryName = src.projectDirectoryName;
+        } else if (dst.projectDirectoryName == L"Personal Windhawk Mods" && !src.projectDirectoryName.empty() && !isBadProject(src.projectDirectoryName)) {
+            dst.projectDirectoryName = src.projectDirectoryName;
         }
-        if (dst.conversationTitle.empty() || IsUuidString(dst.conversationTitle)) {
-            if (!src.conversationTitle.empty() && !IsUuidString(src.conversationTitle)) {
-                dst.conversationTitle = src.conversationTitle;
-            }
+
+        auto isBadTitle = [](const std::wstring& t) {
+            return t.empty() || IsUuidString(t) ||
+                   t.rfind(L"Task id", 0) == 0 ||
+                   t.rfind(L"task-", 0) == 0 ||
+                   t.rfind(L"Task \"", 0) == 0;
+        };
+        if (isBadTitle(dst.conversationTitle) && !isBadTitle(src.conversationTitle)) {
+            dst.conversationTitle = src.conversationTitle;
+        } else if (!isBadTitle(src.conversationTitle)) {
+            dst.conversationTitle = src.conversationTitle;
         }
         if (src.cumulativeActiveTimeSec > dst.cumulativeActiveTimeSec) {
             dst.cumulativeActiveTimeSec = src.cumulativeActiveTimeSec;
@@ -1933,11 +2086,16 @@ private:
         if (!src.activeSubagentRole.empty()) {
             dst.activeSubagentRole = src.activeSubagentRole;
         }
-        if (!src.currentExecutionStatus.empty()) {
-            dst.currentExecutionStatus = src.currentExecutionStatus;
-        }
-        if (src.isModelActive) {
+        if (src.mtimeKey >= dst.mtimeKey) {
+            dst.isModelActive = src.isModelActive;
+            if (!src.currentExecutionStatus.empty()) {
+                dst.currentExecutionStatus = src.currentExecutionStatus;
+            }
+        } else if (src.isModelActive) {
             dst.isModelActive = true;
+            if (!src.currentExecutionStatus.empty()) {
+                dst.currentExecutionStatus = src.currentExecutionStatus;
+            }
         }
         if (src.currentStep > dst.currentStep) {
             dst.currentStep = src.currentStep;
@@ -1945,8 +2103,14 @@ private:
         if (src.currentTurn > dst.currentTurn) {
             dst.currentTurn = src.currentTurn;
         }
-        if (src.activeSubagents.size() > dst.activeSubagents.size()) {
+        if (!src.activeSubagents.empty()) {
             dst.activeSubagents = src.activeSubagents;
+        }
+        if (!src.activeTasks.empty()) {
+            dst.activeTasks = src.activeTasks;
+        }
+        if (!src.lastCompletedEvent.empty()) {
+            dst.lastCompletedEvent = src.lastCompletedEvent;
         }
         if (src.mtimeKey > dst.mtimeKey) {
             dst.mtimeKey = src.mtimeKey;
@@ -2016,14 +2180,34 @@ private:
         if (!ParseSessionJson(jsonContent, telem)) {
             return false;
         }
-        if (!telem.activeConversationId.empty() &&
-            knownSubagentIds_.find(telem.activeConversationId) != knownSubagentIds_.end()) {
-            return false;
+        if (!telem.activeConversationId.empty()) {
+            std::wstring dbTitle, dbProject, rootId;
+            if (QueryConversationMetaFromDb(telem.activeConversationId, dbTitle, dbProject, &rootId) && !rootId.empty()) {
+                if (rootId != telem.activeConversationId) {
+                    knownSubagentIds_.insert(telem.activeConversationId);
+                    if (telem.activeSubagentRole.empty() || telem.activeSubagentRole == L"Main Agent") {
+                        telem.activeSubagentRole = L"Worker";
+                    }
+                    telem.activeConversationId = rootId;
+                }
+                if (!dbTitle.empty() && (telem.conversationTitle.empty() || IsUuidString(telem.conversationTitle))) {
+                    telem.conversationTitle = dbTitle;
+                }
+                if (!dbProject.empty() && (telem.projectDirectoryName.empty() || telem.projectDirectoryName == L"antigravity-handoff")) {
+                    telem.projectDirectoryName = dbProject;
+                }
+            }
         }
+        const bool wasModelActive = telem.isModelActive;
+        const std::wstring savedToolAction = telem.currentToolAction;
+        const std::wstring savedStatus = telem.currentExecutionStatus;
         EnrichSessionFromBrainLocked(telem);
-        if (!telem.activeConversationId.empty() &&
-            knownSubagentIds_.find(telem.activeConversationId) != knownSubagentIds_.end()) {
-            return false;
+        if (wasModelActive) {
+            telem.isModelActive = true;
+            if (!savedStatus.empty()) telem.currentExecutionStatus = savedStatus;
+        }
+        if (!savedToolAction.empty()) {
+            telem.currentToolAction = savedToolAction;
         }
 
         std::lock_guard<std::mutex> lock(stateMutex_);
@@ -2035,7 +2219,7 @@ private:
                 return s.sourceFilePath == sessionTag;
             });
         if (it != sessions_.end()) {
-            *it = std::move(telem);
+            MergeSessionTelemetry(*it, telem);
         } else {
             sessions_.push_back(std::move(telem));
         }
@@ -2165,7 +2349,13 @@ private:
                 }
             }
 
-            // 3. Scan .system_generated\subagents to get alive subagents count & details
+            // 3. Enrich from parent transcript.jsonl using bounded streaming tail reader
+            std::wstring transcriptPath = convFolder + L"\\.system_generated\\logs\\transcript.jsonl";
+            if (FileExists(transcriptPath)) {
+                EnrichSessionFromTranscript(transcriptPath, telem);
+            }
+
+            // 4. Scan .system_generated\subagents to get alive subagents count & details
             std::wstring subagentsDir = convFolder + L"\\.system_generated\\subagents";
             if (DirectoryExists(subagentsDir)) {
                 WIN32_FIND_DATAW safd;
@@ -2241,16 +2431,13 @@ private:
                             if (FileExists(saTranscript)) {
                                 EnrichSessionFromTranscript(saTranscript, telem);
                                 telem.activeSubagentRole = primaryAliveSaRole;
+                                telem.isModelActive = true;
+                                telem.currentExecutionStatus = L"Executing";
+                                telem.lastWriteTime = ftNow;
                             }
                         }
                     }
                 }
-            }
-
-            // 4. Enrich from transcript.jsonl using bounded streaming tail reader
-            std::wstring transcriptPath = convFolder + L"\\.system_generated\\logs\\transcript.jsonl";
-            if (FileExists(transcriptPath)) {
-                EnrichSessionFromTranscript(transcriptPath, telem);
             }
         }
 
@@ -2266,10 +2453,28 @@ private:
             telem.currentStep = 1;
         }
 
-        if (telem.conversationTitle.empty() || IsUuidString(telem.conversationTitle) || telem.conversationTitle == telem.activeConversationId) {
+        auto isBadTitle = [](const std::wstring& t) {
+            return t.empty() || IsUuidString(t) ||
+                   t.rfind(L"Task id", 0) == 0 ||
+                   t.rfind(L"task-", 0) == 0 ||
+                   t.rfind(L"Task \"", 0) == 0;
+        };
+
+        // Try querying title & project directory from Antigravity's conversation_summaries.db
+        if (isBadTitle(telem.conversationTitle)) {
+            std::wstring dbTitle, dbProject;
+            if (QueryConversationMetaFromDb(telem.activeConversationId, dbTitle, dbProject)) {
+                if (!dbTitle.empty()) telem.conversationTitle = dbTitle;
+                if (!dbProject.empty() && (telem.projectDirectoryName.empty() || telem.projectDirectoryName == L"antigravity-handoff")) {
+                    telem.projectDirectoryName = dbProject;
+                }
+            }
+        }
+
+        if (isBadTitle(telem.conversationTitle)) {
             if (!telem.sessionName.empty() && !IsUuidString(telem.sessionName)) {
                 telem.conversationTitle = telem.sessionName;
-            } else if (!telem.lastMessageSnippet.empty()) {
+            } else if (!telem.lastMessageSnippet.empty() && !isBadTitle(telem.lastMessageSnippet)) {
                 std::wstring snippet = telem.lastMessageSnippet;
                 if (snippet.rfind(L"Task: ", 0) == 0) {
                     snippet = snippet.substr(6);
@@ -2277,13 +2482,22 @@ private:
                 size_t nl = snippet.find_first_of(L"\r\n");
                 if (nl != std::wstring::npos) snippet = snippet.substr(0, nl);
                 if (snippet.size() > 60) snippet = snippet.substr(0, 57) + L"...";
-                if (!snippet.empty()) {
+                if (!snippet.empty() && !isBadTitle(snippet)) {
                     telem.conversationTitle = snippet;
                 }
             }
         }
-        if (telem.conversationTitle.empty() || IsUuidString(telem.conversationTitle)) {
-            telem.conversationTitle = L"Feature Intent: Dynamic Island AGY Polish & Telemetry";
+        if (isBadTitle(telem.conversationTitle)) {
+            telem.conversationTitle = L"Resume Antigravity Handoff";
+        }
+        if (telem.projectDirectoryName.empty() || telem.projectDirectoryName == L"antigravity-handoff") {
+            telem.projectDirectoryName = L"Personal Windhawk Mods";
+        }
+
+        size_t pPos = 0;
+        while ((pPos = telem.projectDirectoryName.find(L"%20", pPos)) != std::wstring::npos) {
+            telem.projectDirectoryName.replace(pPos, 3, L" ");
+            pPos += 1;
         }
 
         if (telem.lastMessageSender.empty()) {
@@ -2428,6 +2642,51 @@ private:
             uint64_t mtime = (static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
                               fad.ftLastWriteTime.dwLowDateTime;
 
+            // Fold in subagents, messages, and tasks folder modification times so live subagent activity updates telemetry
+            std::wstring sDir = GetDirectoryFromPath(path);
+            if (sDir.find(L"logs") != std::wstring::npos) sDir = GetDirectoryFromPath(sDir);
+            if (sDir.find(L".system_generated") != std::wstring::npos) sDir = GetDirectoryFromPath(sDir);
+
+            std::wstring saDir = sDir + L"\\.system_generated\\subagents";
+            if (DirectoryExists(saDir)) {
+                WIN32_FIND_DATAW safd;
+                HANDLE hFindSa = FindFirstFileW((saDir + L"\\*.json").c_str(), &safd);
+                if (hFindSa != INVALID_HANDLE_VALUE) {
+                    do {
+                        if (!(safd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                            uint64_t saMtime = (static_cast<uint64_t>(safd.ftLastWriteTime.dwHighDateTime) << 32) | safd.ftLastWriteTime.dwLowDateTime;
+                            if (saMtime > mtime) mtime = saMtime;
+
+                            // Check subagent's live transcript in brainScanDir_
+                            std::wstring saId = safd.cFileName;
+                            size_t dotPos = saId.find(L".json");
+                            if (dotPos != std::wstring::npos) saId = saId.substr(0, dotPos);
+                            if (!saId.empty() && !brainScanDir_.empty()) {
+                                std::wstring saLog = brainScanDir_ + L"\\" + saId + L"\\.system_generated\\logs\\transcript.jsonl";
+                                WIN32_FILE_ATTRIBUTE_DATA logFad = {};
+                                if (GetFileAttributesExW(saLog.c_str(), GetFileExInfoStandard, &logFad)) {
+                                    uint64_t logMtime = (static_cast<uint64_t>(logFad.ftLastWriteTime.dwHighDateTime) << 32) | logFad.ftLastWriteTime.dwLowDateTime;
+                                    if (logMtime > mtime) mtime = logMtime;
+                                }
+                            }
+                        }
+                    } while (FindNextFileW(hFindSa, &safd));
+                    FindClose(hFindSa);
+                }
+            }
+            std::wstring msgDir = sDir + L"\\.system_generated\\messages";
+            WIN32_FILE_ATTRIBUTE_DATA msgFad = {};
+            if (GetFileAttributesExW(msgDir.c_str(), GetFileExInfoStandard, &msgFad)) {
+                uint64_t msgMtime = (static_cast<uint64_t>(msgFad.ftLastWriteTime.dwHighDateTime) << 32) | msgFad.ftLastWriteTime.dwLowDateTime;
+                if (msgMtime > mtime) mtime = msgMtime;
+            }
+            std::wstring tasksDir = sDir + L"\\.system_generated\\tasks";
+            WIN32_FILE_ATTRIBUTE_DATA taskFad = {};
+            if (GetFileAttributesExW(tasksDir.c_str(), GetFileExInfoStandard, &taskFad)) {
+                uint64_t taskMtime = (static_cast<uint64_t>(taskFad.ftLastWriteTime.dwHighDateTime) << 32) | taskFad.ftLastWriteTime.dwLowDateTime;
+                if (taskMtime > mtime) mtime = taskMtime;
+            }
+
             auto existingIt = std::find_if(sessions_.begin(), sessions_.end(),
                 [&path](const SessionTelemetry& s) { return s.sourceFilePath == path; });
 
@@ -2459,7 +2718,12 @@ private:
 
                 if (!telem.activeConversationId.empty() &&
                     knownSubagentIds_.find(telem.activeConversationId) != knownSubagentIds_.end()) {
-                    continue;
+                    std::wstring dbTitle, dbProject, rootId;
+                    if (QueryConversationMetaFromDb(telem.activeConversationId, dbTitle, dbProject, &rootId) && !rootId.empty()) {
+                        telem.activeConversationId = rootId;
+                    } else {
+                        continue;
+                    }
                 }
 
                 EnrichSessionFromTranscript(path, telem);
@@ -2492,7 +2756,12 @@ private:
             if (ParseSessionJson(content, telem)) {
                 if (!telem.activeConversationId.empty() &&
                     knownSubagentIds_.find(telem.activeConversationId) != knownSubagentIds_.end()) {
-                    continue;
+                    std::wstring dbTitle, dbProject, rootId;
+                    if (QueryConversationMetaFromDb(telem.activeConversationId, dbTitle, dbProject, &rootId) && !rootId.empty()) {
+                        telem.activeConversationId = rootId;
+                    } else {
+                        continue;
+                    }
                 }
                 EnrichSessionFromBrainLocked(telem);
                 if (!telem.activeConversationId.empty() &&

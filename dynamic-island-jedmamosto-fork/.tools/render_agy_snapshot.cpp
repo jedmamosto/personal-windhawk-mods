@@ -125,11 +125,9 @@ void DrawCircularProgressRing(
 void DrawCollapsedNotchPill(
     ID2D1RenderTarget* rt,
     ID2D1Factory* factory,
-    IDWriteTextFormat* textFmt,
     D2D1_RECT_F rect,
-    bool showTextInfo,
-    const wchar_t* infoText,
-    bool isWarning = false
+    bool isWorking,
+    D2D1_COLOR_F statusColor
 ) {
     float pillRadius = (rect.bottom - rect.top) * 0.5f;
 
@@ -146,18 +144,11 @@ void DrawCollapsedNotchPill(
     rt->CreateSolidColorBrush(tokens::kCardHairlineHigh, &borderBrush);
     rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, pillRadius, pillRadius), borderBrush.Get(), 1.0f);
 
-    D2D1_COLOR_F statusColor = isWarning ? tokens::kAppleAmber : tokens::kAppleGreen;
+    const D2D1_POINT_2F orbCenter = D2D1::Point2F((rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f);
 
-    D2D1_POINT_2F orbCenter;
-    if (showTextInfo) {
-        orbCenter = D2D1::Point2F(rect.left + pillRadius, (rect.top + rect.bottom) * 0.5f);
-    } else {
-        orbCenter = D2D1::Point2F((rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f);
-    }
-
-    if (!showTextInfo) {
+    if (!isWorking) {
         // Minimized Mode (Idle Standby 46x34):
-        // Clean solid fill without outer halo rings, zero overlapping strokes, zero clipping against main notch.
+        // Clean solid fill dot without outer halo rings, zero overlapping strokes, zero clipping against main notch.
         rt->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         ComPtr<ID2D1SolidColorBrush> orbBrush;
         rt->CreateSolidColorBrush(D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.95f), &orbBrush);
@@ -165,17 +156,15 @@ void DrawCollapsedNotchPill(
         rt->FillEllipse(D2D1::Ellipse(orbCenter, coreRadius, coreRadius), orbBrush.Get());
         rt->PopAxisAlignedClip();
     } else {
-        // Normal Mode (148x34 / Extended Pill):
-        // Outer Ambient Glow Ring
-        const float ringRadius = 9.5f;
-        const float ringStroke = 1.8f;
+        // Normal Mode (Active Working 46x34):
+        // Glowing status orb with glint and contained ambient aura. Zero crowded text.
+        rt->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        const float ringRadius = 8.5f;
+        const float ringStroke = 1.6f;
 
         ComPtr<ID2D1SolidColorBrush> ringBgBrush;
         rt->CreateSolidColorBrush(D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.22f), &ringBgBrush);
         rt->DrawEllipse(D2D1::Ellipse(orbCenter, ringRadius, ringRadius), ringBgBrush.Get(), ringStroke);
-
-        // Active Segment Arc
-        DrawCircularProgressRing(rt, factory, orbCenter, ringRadius, ringStroke, 0.75f, statusColor, D2D1::ColorF(0,0,0,0));
 
         // Solid Status Orb Core
         ComPtr<ID2D1SolidColorBrush> orbBrush;
@@ -187,20 +176,12 @@ void DrawCollapsedNotchPill(
         rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.65f), &specBrush);
         rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(orbCenter.x - 1.0f, orbCenter.y - 1.0f), 1.1f, 1.1f), specBrush.Get());
 
-        // Glanceable Text Label
-        if (infoText && textFmt) {
-            ComPtr<ID2D1SolidColorBrush> textBrush;
-            rt->CreateSolidColorBrush(tokens::kTextPrimary, &textBrush);
-            D2D1_RECT_F textRect = D2D1::RectF(
-                orbCenter.x + ringRadius + 8.0f,
-                rect.top,
-                rect.right - 14.0f,
-                rect.bottom
-            );
-            textFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            textFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            rt->DrawTextW(infoText, static_cast<UINT32>(wcslen(infoText)), textFmt, textRect, textBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
+        // Subtle Status Halo Contour Stroke
+        ComPtr<ID2D1SolidColorBrush> statusBorderBrush;
+        rt->CreateSolidColorBrush(D2D1::ColorF(statusColor.r, statusColor.g, statusColor.b, 0.35f), &statusBorderBrush);
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, pillRadius, pillRadius), statusBorderBrush.Get(), 1.0f);
+
+        rt->PopAxisAlignedClip();
     }
 }
 
@@ -585,40 +566,40 @@ int wmain(int argc, wchar_t* argv[]) {
             D2D1::RectF(24.0f, 16.0f, 596.0f, 32.0f), labelBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
-    // Pill A: Minimized Mode (46x34) - Clean Solid Fill (Zero Halo, Zero Overlap, Idle Standby)
-    D2D1_RECT_F pillARect = D2D1::RectF(24.0f, 40.0f, 70.0f, 74.0f);
-    DrawCollapsedNotchPill(rt.Get(), d2dFactory.Get(), smallFmt.Get(), pillARect, false, nullptr, false);
+    // Pill A: Minimized Mode (46x34) - Clean Solid Fill (Zero Halo, Zero Bleed, Idle Standby)
+    D2D1_RECT_F pillARect = D2D1::RectF(54.5f, 40.0f, 100.5f, 74.0f);
+    DrawCollapsedNotchPill(rt.Get(), d2dFactory.Get(), pillARect, false, tokens::kAppleGreen);
 
-    // Pill B: Normal Mode (148x34) - Glowing Status Orb + Ambient Halo + Glanceable Turn/Step
-    D2D1_RECT_F pillBRect = D2D1::RectF(82.0f, 40.0f, 230.0f, 74.0f);
-    DrawCollapsedNotchPill(rt.Get(), d2dFactory.Get(), smallFmt.Get(), pillBRect, true, L"Turn 5 • Step 140", false);
+    // Pill B: Normal Mode (46x34) - Glowing Status Orb + Ambient Halo + Glint
+    D2D1_RECT_F pillBRect = D2D1::RectF(209.5f, 40.0f, 255.5f, 74.0f);
+    DrawCollapsedNotchPill(rt.Get(), d2dFactory.Get(), pillBRect, true, tokens::kAppleGreen);
 
-    // Pill C: Normal Mode Compaction Warning (148x34) - Amber Orb + Amber Halo Alert
-    D2D1_RECT_F pillCRect = D2D1::RectF(242.0f, 40.0f, 390.0f, 74.0f);
-    DrawCollapsedNotchPill(rt.Get(), d2dFactory.Get(), smallFmt.Get(), pillCRect, true, L"80% Tokens Alert", true);
+    // Pill C: Normal Mode Warning (46x34) - Glowing Amber Orb + Ambient Halo Alert
+    D2D1_RECT_F pillCRect = D2D1::RectF(364.5f, 40.0f, 410.5f, 74.0f);
+    DrawCollapsedNotchPill(rt.Get(), d2dFactory.Get(), pillCRect, true, tokens::kAppleAmber);
 
-    // Pill D: Normal Mode Active Tool (196x34) - Live Real-Time Tool Action
-    D2D1_RECT_F pillDRect = D2D1::RectF(402.0f, 40.0f, 598.0f, 74.0f);
-    DrawCollapsedNotchPill(rt.Get(), d2dFactory.Get(), smallFmt.Get(), pillDRect, true, L"Updating Direct2D Layout", false);
+    // Pill D: Normal Mode Critical (46x34) - Glowing Red Orb + Ambient Halo Pressure
+    D2D1_RECT_F pillDRect = D2D1::RectF(519.5f, 40.0f, 565.5f, 74.0f);
+    DrawCollapsedNotchPill(rt.Get(), d2dFactory.Get(), pillDRect, true, tokens::kAppleRed);
 
     // Sub-labels for Pill Showcase
     if (microFmt) {
-        microFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        const wchar_t kDescA[] = L"A: 46x34 Minimized";
+        microFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        const wchar_t kDescA[] = L"A: Minimized (Solid Dot)";
         rt->DrawTextW(kDescA, static_cast<UINT32>(wcslen(kDescA)), microFmt.Get(),
-            D2D1::RectF(24.0f, 78.0f, 80.0f, 92.0f), labelBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            D2D1::RectF(0.0f, 78.0f, 155.0f, 94.0f), labelBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-        const wchar_t kDescB[] = L"B: 148x34 Normal (Orb+Halo)";
+        const wchar_t kDescB[] = L"B: Normal (Green Orb)";
         rt->DrawTextW(kDescB, static_cast<UINT32>(wcslen(kDescB)), microFmt.Get(),
-            D2D1::RectF(82.0f, 78.0f, 238.0f, 92.0f), labelBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            D2D1::RectF(155.0f, 78.0f, 310.0f, 94.0f), labelBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-        const wchar_t kDescC[] = L"C: 148x34 Warning (Amber)";
+        const wchar_t kDescC[] = L"C: Warning (Amber Orb)";
         rt->DrawTextW(kDescC, static_cast<UINT32>(wcslen(kDescC)), microFmt.Get(),
-            D2D1::RectF(242.0f, 78.0f, 398.0f, 92.0f), labelBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            D2D1::RectF(310.0f, 78.0f, 465.0f, 94.0f), labelBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-        const wchar_t kDescD[] = L"D: 196x34 Active Tool Action";
+        const wchar_t kDescD[] = L"D: Critical (Red Orb)";
         rt->DrawTextW(kDescD, static_cast<UINT32>(wcslen(kDescD)), microFmt.Get(),
-            D2D1::RectF(402.0f, 78.0f, 600.0f, 92.0f), labelBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            D2D1::RectF(465.0f, 78.0f, 620.0f, 94.0f), labelBrush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
     // --- Section 2: Expanded Island Dashboard (AGY 2.0) ---

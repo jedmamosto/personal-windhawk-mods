@@ -3850,19 +3850,14 @@ class Renderer {
                 statusColor = D2D1::ColorF(0x4CC9F0);
             }
 
-            const bool showText = pillW > 70.0f * settings.sizeScale;
-            D2D1_POINT_2F orbCenter;
-            if (showText) {
-                orbCenter = D2D1::Point2F(rect.left + pillRadius, (rect.top + rect.bottom) * 0.5f);
-            } else {
-                orbCenter = D2D1::Point2F((rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f);
-            }
-
+            const D2D1_POINT_2F orbCenter = D2D1::Point2F((rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f);
             const float haloRadius = std::min(8.5f * settings.sizeScale, pillRadius - 1.5f);
 
-            if (!showText) {
-                // Minimized Notch Mode:
-                // Clean solid fill without outer halo rings or overlapping strokes.
+            const bool isWorking = (runningCount > 0 || isModelActive);
+
+            if (!isWorking) {
+                // Mode 1: Minimized Notch Mode (Standby / Inactivity)
+                // Clean solid fill dot without outer halo rings or overlapping strokes.
                 // Strictly clipped to capsule/notch shape bounds to eliminate any graphical bleed or overlap.
                 ComPtr<ID2D1Geometry> clipGeom = CreateIslandMaskGeometry(rect, radius, settings.notchStyle);
                 ComPtr<ID2D1Layer> clipLayer;
@@ -3885,8 +3880,17 @@ class Renderer {
                     target_->PopAxisAlignedClip();
                 }
             } else {
-                // Normal Notch Mode:
-                // Retains the status orb core, specular glint, and ambient aura halo.
+                // Mode 2: Normal Notch Mode (Active Working)
+                // Retains the glowing status orb core, specular glint, and ambient aura halo.
+                // Zero crowded text at this compact size.
+                ComPtr<ID2D1Geometry> clipGeom = CreateIslandMaskGeometry(rect, radius, settings.notchStyle);
+                ComPtr<ID2D1Layer> clipLayer;
+                if (clipGeom && SUCCEEDED(target_->CreateLayer(nullptr, &clipLayer))) {
+                    target_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), clipGeom.Get()), clipLayer.Get());
+                } else {
+                    target_->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                }
+
                 const float haloStroke = 1.6f * settings.sizeScale;
                 ComPtr<ID2D1SolidColorBrush> haloBrush;
                 if (SUCCEEDED(target_->CreateSolidColorBrush(
@@ -3924,39 +3928,11 @@ class Renderer {
                     );
                     DrawIslandShape(borderRect, radius, settings.w11Style, settings.notchStyle, statusBorderBrush.Get(), strokeW);
                 }
-            }
 
-            // 4. Optional Turn / Step / Action Label (Extended Pill Mode)
-            if (showText && smallTextFormat_) {
-                std::wstring label;
-                if (session && !session->currentToolAction.empty() && (runningCount > 0 || isModelActive)) {
-                    label = session->currentToolAction;
-                } else if (session && session->currentTurn > 0) {
-                    wchar_t buf[64];
-                    if (session->currentStep > 0) {
-                        swprintf_s(buf, L"Turn %d • Step %d", session->currentTurn, session->currentStep);
-                    } else {
-                        swprintf_s(buf, L"Turn %d", session->currentTurn);
-                    }
-                    label = buf;
+                if (clipLayer) {
+                    target_->PopLayer();
                 } else {
-                    label = L"AGY Ready";
-                }
-
-                ComPtr<ID2D1SolidColorBrush> textBrush;
-                if (SUCCEEDED(target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f), &textBrush))) {
-                    D2D1_RECT_F textRect = D2D1::RectF(
-                        orbCenter.x + haloRadius + 6.0f * settings.sizeScale,
-                        rect.top,
-                        rect.right - 8.0f * settings.sizeScale,
-                        rect.bottom
-                    );
-                    smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                    smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    target_->DrawTextW(label.c_str(), static_cast<UINT32>(label.size()),
-                                       smallTextFormat_.Get(), textRect, textBrush.Get(),
-                                       D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                    smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                    target_->PopAxisAlignedClip();
                 }
             }
         }

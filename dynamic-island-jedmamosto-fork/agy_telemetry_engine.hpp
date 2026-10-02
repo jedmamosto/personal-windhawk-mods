@@ -991,12 +991,12 @@ inline bool QueryConversationMetaFromDb(const std::wstring& convId, std::wstring
     HMODULE hSqlite = LoadLibraryW(L"winsqlite3.dll");
     if (!hSqlite) return false;
 
-    typedef int (*sqlite3_open_v2_t)(const char *filename, void **ppDb, int flags, const char *zVfs);
-    typedef int (*sqlite3_prepare_v2_t)(void *db, const char *zSql, int nByte, void **ppStmt, const char **pzTail);
-    typedef int (*sqlite3_step_t)(void *pStmt);
-    typedef const unsigned char *(*sqlite3_column_text_t)(void *pStmt, int iCol);
-    typedef int (*sqlite3_finalize_t)(void *pStmt);
-    typedef int (*sqlite3_close_t)(void *db);
+    typedef int (WINAPI *sqlite3_open_v2_t)(const char *filename, void **ppDb, int flags, const char *zVfs);
+    typedef int (WINAPI *sqlite3_prepare_v2_t)(void *db, const char *zSql, int nByte, void **ppStmt, const char **pzTail);
+    typedef int (WINAPI *sqlite3_step_t)(void *pStmt);
+    typedef const unsigned char *(WINAPI *sqlite3_column_text_t)(void *pStmt, int iCol);
+    typedef int (WINAPI *sqlite3_finalize_t)(void *pStmt);
+    typedef int (WINAPI *sqlite3_close_t)(void *db);
 
     auto pOpen = reinterpret_cast<sqlite3_open_v2_t>(GetProcAddress(hSqlite, "sqlite3_open_v2"));
     auto pPrep = reinterpret_cast<sqlite3_prepare_v2_t>(GetProcAddress(hSqlite, "sqlite3_prepare_v2"));
@@ -2521,9 +2521,12 @@ private:
 
         knownSubagentIds_.clear();
 
-        // Pass 1: Scan all session folders in brainScanDir_. For each folder that has a
-        // .system_generated\subagents subfolder, find all *.json files inside it.
-        // Extract "conversationId" from each json and add it to knownSubagentIds_.
+        struct BrainFolderEntry {
+            std::wstring name;
+            uint64_t mtime = 0;
+        };
+        std::vector<BrainFolderEntry> folderEntries;
+
         std::wstring searchPattern = brainScanDir_ + L"\\*";
         WIN32_FIND_DATAW fd;
         HANDLE hFind = FindFirstFileW(searchPattern.c_str(), &fd);
@@ -2531,76 +2534,76 @@ private:
             do {
                 if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
                     wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
-                    
-                    std::wstring subagentsDir = brainScanDir_ + L"\\" + fd.cFileName + L"\\.system_generated\\subagents";
-                    if (DirectoryExists(subagentsDir)) {
-                        WIN32_FIND_DATAW safd;
-                        HANDLE hFindSa = FindFirstFileW((subagentsDir + L"\\*.json").c_str(), &safd);
-                        if (hFindSa != INVALID_HANDLE_VALUE) {
-                            do {
-                                if (!(safd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                                    std::wstring saFilePath = subagentsDir + L"\\" + safd.cFileName;
-                                    std::string saJson = ReadFileShared(saFilePath);
-                                    if (!saJson.empty()) {
-                                        json::Value saRoot;
-                                        if (json::Parse(saJson, saRoot) && saRoot.IsObject()) {
-                                            std::wstring saId = saRoot["conversationId"].AsWString();
-                                            if (!saId.empty()) {
-                                                knownSubagentIds_.insert(saId);
-                                            }
-                                        }
-                                    }
-                                }
-                            } while (FindNextFileW(hFindSa, &safd));
-                            FindClose(hFindSa);
-                        }
-                    }
+                    uint64_t mt = (static_cast<uint64_t>(fd.ftLastWriteTime.dwHighDateTime) << 32) | fd.ftLastWriteTime.dwLowDateTime;
+                    folderEntries.push_back({ fd.cFileName, mt });
                 }
             } while (FindNextFileW(hFind, &fd));
             FindClose(hFind);
         }
 
-        // Pass 2: When reading candidate folders to populate sessions_, SKIP any folder
-        // whose name/ID is present in knownSubagentIds_. This guarantees the island
-        // strictly tracks the Root Human Conversation!
+        // Sort descending by last write time (MRU: most recently active conversations first)
+        std::sort(folderEntries.begin(), folderEntries.end(),
+            [](const BrainFolderEntry& a, const BrainFolderEntry& b) {
+                return a.mtime > b.mtime;
+            });
+
+        // Pass 1: Inspect subagent metadata in the top 20 most recent session folders
+        size_t pass1Limit = std::min<size_t>(folderEntries.size(), 20);
+        for (size_t i = 0; i < pass1Limit; ++i) {
+            std::wstring subagentsDir = brainScanDir_ + L"\\" + folderEntries[i].name + L"\\.system_generated\\subagents";
+            if (DirectoryExists(subagentsDir)) {
+                WIN32_FIND_DATAW safd;
+                HANDLE hFindSa = FindFirstFileW((subagentsDir + L"\\*.json").c_str(), &safd);
+                if (hFindSa != INVALID_HANDLE_VALUE) {
+                    do {
+                        if (!(safd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                            std::wstring saFilePath = subagentsDir + L"\\" + safd.cFileName;
+                            std::string saJson = ReadFileShared(saFilePath);
+                            if (!saJson.empty()) {
+                                json::Value saRoot;
+                                if (json::Parse(saJson, saRoot) && saRoot.IsObject()) {
+                                    std::wstring saId = saRoot["conversationId"].AsWString();
+                                    if (!saId.empty()) {
+                                        knownSubagentIds_.insert(saId);
+                                    }
+                                }
+                            }
+                        }
+                    } while (FindNextFileW(hFindSa, &safd));
+                    FindClose(hFindSa);
+                }
+            }
+        }
+
+        // Pass 2: Pick top root conversations (skipping subagents)
         std::wstring directPrimary = brainScanDir_ + L"\\island_telemetry.json";
         if (std::find(outPaths.begin(), outPaths.end(), directPrimary) == outPaths.end()) {
             if (FileExists(directPrimary)) outPaths.push_back(directPrimary);
         }
 
-        hFind = FindFirstFileW(searchPattern.c_str(), &fd);
-        if (hFind != INVALID_HANDLE_VALUE) {
-            int scannedFolders = 0;
-            do {
-                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                    wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
-                    
-                    // Skip any folder that belongs to a known subagent
-                    if (knownSubagentIds_.find(fd.cFileName) != knownSubagentIds_.end()) {
-                        continue;
-                    }
+        int collectedRoots = 0;
+        for (const auto& entry : folderEntries) {
+            if (knownSubagentIds_.find(entry.name) != knownSubagentIds_.end()) {
+                continue;
+            }
 
-                    std::wstring subPath = brainScanDir_ + L"\\" + fd.cFileName;
-                    std::wstring cand1 = subPath + L"\\island_telemetry.json";
-                    std::wstring cand2 = subPath + L"\\scratch\\island_telemetry.json";
-                    std::wstring cand3 = subPath + L"\\agy_telemetry.json";
-                    std::wstring cand4 = subPath + L"\\.system_generated\\logs\\transcript.jsonl";
+            std::wstring subPath = brainScanDir_ + L"\\" + entry.name;
+            std::wstring cand1 = subPath + L"\\island_telemetry.json";
+            std::wstring cand2 = subPath + L"\\scratch\\island_telemetry.json";
+            std::wstring cand3 = subPath + L"\\agy_telemetry.json";
+            std::wstring cand4 = subPath + L"\\.system_generated\\logs\\transcript.jsonl";
 
-                    bool hasJson = false;
-                    if (FileExists(cand1)) { outPaths.push_back(cand1); hasJson = true; }
-                    else if (FileExists(cand2)) { outPaths.push_back(cand2); hasJson = true; }
-                    else if (FileExists(cand3)) { outPaths.push_back(cand3); hasJson = true; }
+            bool hasJson = false;
+            if (FileExists(cand1)) { outPaths.push_back(cand1); hasJson = true; }
+            else if (FileExists(cand2)) { outPaths.push_back(cand2); hasJson = true; }
+            else if (FileExists(cand3)) { outPaths.push_back(cand3); hasJson = true; }
 
-                    // Only fallback to raw transcript.jsonl if no island/agy telemetry json exists in this session folder
-                    if (!hasJson && FileExists(cand4) && std::find(outPaths.begin(), outPaths.end(), cand4) == outPaths.end()) {
-                        outPaths.push_back(cand4);
-                    }
+            if (!hasJson && FileExists(cand4) && std::find(outPaths.begin(), outPaths.end(), cand4) == outPaths.end()) {
+                outPaths.push_back(cand4);
+            }
 
-                    scannedFolders++;
-                    if (scannedFolders > 100) break;
-                }
-            } while (FindNextFileW(hFind, &fd));
-            FindClose(hFind);
+            collectedRoots++;
+            if (collectedRoots >= 5) break;
         }
 
         // Filter outPaths to ensure no subagent paths slipped through
